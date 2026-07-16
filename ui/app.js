@@ -10,6 +10,8 @@
     openLogIds: new Set(),
     policyDraft: null,
     installationDraft: null,
+    policiesHydrated: false,
+    policiesDirty: false,
     policyMeta: {
       mode_options: ["ephemeral", "pool", "persistent"],
       event_options: ["push", "workflow_dispatch", "schedule", "pull_request", "release"],
@@ -421,24 +423,38 @@
     };
   }
 
-  function syncPolicyDraftFromServer(policies) {
+  function markPoliciesDirty() {
+    state.policiesDirty = true;
+  }
+
+  function bindPolicyDirtyHandlers(root) {
+    if (!root) return;
+    root.querySelectorAll("input, select, textarea").forEach((el) => {
+      el.addEventListener("input", markPoliciesDirty);
+      el.addEventListener("change", markPoliciesDirty);
+    });
+  }
+
+  function syncPolicyDraftFromServer(policies, { force = false } = {}) {
     state.policyMeta.installations = policies?.installations || {};
     state.policyMeta.mode_options = policies?.mode_options || state.policyMeta.mode_options;
     state.policyMeta.event_options = policies?.event_options || state.policyMeta.event_options;
     state.policyMeta.label_options = policies?.label_options || state.policyMeta.label_options;
     state.policyMeta.broker_note = policies?.broker_note || "";
-    // Keep local edits if the user is mid-edit; only bootstrap once.
-    if (!state.policyDraft) {
-      state.policyDraft = JSON.parse(JSON.stringify(policies?.repositories || {}));
-    }
-    if (!state.installationDraft) {
-      state.installationDraft = JSON.parse(JSON.stringify(policies?.installations || {}));
-    }
     const list = $("repo-list");
     list.innerHTML = Object.keys(policies?.repositories || {})
       .map((name) => `<option value="${escapeHtml(name)}"></option>`)
       .join("");
     $("policy-note").textContent = state.policyMeta.broker_note || "";
+
+    // Never wipe in-progress edits (SSE used to re-render and steal focus).
+    if (state.policiesHydrated && !force) {
+      return;
+    }
+    state.policyDraft = JSON.parse(JSON.stringify(policies?.repositories || {}));
+    state.installationDraft = JSON.parse(JSON.stringify(policies?.installations || {}));
+    state.policiesHydrated = true;
+    state.policiesDirty = false;
     renderInstallationEditor();
     renderPolicyEditor();
   }
@@ -518,6 +534,7 @@
     editor.innerHTML =
       cards ||
       `<div class="empty">Nenhuma installation. Clique em Add installation (ex.: após rename de handle).</div>`;
+    bindPolicyDirtyHandlers(editor);
     editor.querySelectorAll(".btn-install-delete").forEach((button) => {
       button.addEventListener("click", async () => {
         const card = button.closest(".install-card");
@@ -612,6 +629,7 @@
       })
       .join("");
     editor.innerHTML = cards || `<div class="empty">Nenhuma policy configurada. Clique em Add repository.</div>`;
+    bindPolicyDirtyHandlers(editor);
     editor.querySelectorAll(".btn-policy-delete").forEach((button) => {
       button.addEventListener("click", async () => {
         const card = button.closest(".policy-card");
@@ -675,15 +693,16 @@
       });
       if (!ok) return;
       const server = state.lastSnapshot?.policies || {};
-      state.policyDraft = JSON.parse(JSON.stringify(server.repositories || {}));
-      state.installationDraft = JSON.parse(JSON.stringify(server.installations || {}));
-      renderInstallationEditor();
-      renderPolicyEditor();
+      state.policiesHydrated = false;
+      state.policiesDirty = false;
+      syncPolicyDraftFromServer(server, { force: true });
       showToast("info", "Policies reset", "Draft restaurado a partir do servidor.", 5000);
     });
     $("btn-policy-save").addEventListener("click", async () => {
       const installations = collectInstallationDraftFromDom();
       const repositories = collectPolicyDraftFromDom();
+      state.installationDraft = installations;
+      state.policyDraft = repositories;
       if (!Object.keys(installations).length) {
         showToast("bad", "Policies inválidas", "Mantenha ao menos uma GitHub installation.", 8000);
         return;
@@ -726,9 +745,9 @@
           body = { detail: text };
         }
         if (!response.ok) throw new Error(body.detail || body.message || `HTTP ${response.status}`);
-        state.policyDraft = null;
-        state.installationDraft = null;
-        syncPolicyDraftFromServer(body.policies || { repositories, installations });
+        state.policiesHydrated = false;
+        state.policiesDirty = false;
+        syncPolicyDraftFromServer(body.policies || { repositories, installations }, { force: true });
         showToast(
           "ok",
           "Policies salvas",
@@ -740,8 +759,6 @@
         });
         if (snap.ok) {
           const snapshot = await snap.json();
-          state.policyDraft = null;
-          state.installationDraft = null;
           applySnapshot(snapshot);
         }
       } catch (error) {
@@ -839,17 +856,18 @@
     renderJobs(snapshot.jobs || []);
     renderDeliveries(snapshot.deliveries || []);
     renderLogs(snapshot.logs || []);
-    // Do not clobber in-progress policy/installation edits on every SSE tick.
+    // Policies: hydrate once; never re-render editors while the user is editing.
     if (!state.actionInFlight) {
-      if (!state.policyDraft && !state.installationDraft) {
+      if (!state.policiesHydrated) {
         syncPolicyDraftFromServer(snapshot.policies || {});
       } else {
-        // Keep meta/options fresh, preserve drafts.
         state.policyMeta.installations =
           snapshot.policies?.installations || state.policyMeta.installations;
         state.policyMeta.broker_note =
           snapshot.policies?.broker_note || state.policyMeta.broker_note;
-        $("policy-note").textContent = state.policyMeta.broker_note || "";
+        if (!state.policiesDirty) {
+          $("policy-note").textContent = state.policyMeta.broker_note || "";
+        }
       }
     }
     renderMetrics(snapshot.metrics || {});
