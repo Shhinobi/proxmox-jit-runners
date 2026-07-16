@@ -78,6 +78,9 @@ class CacheConfig:
     mount_path: str = "/cache"
     max_usage_percent: int = 80
     quota_gb: int = 40
+    # Auto-GC orphan dirs (not on allowlist) older than N days during reconcile.
+    # 0 disables automatic GC (manual purge/gc via API still works).
+    gc_orphan_days: int = 7
 
 
 @dataclass(frozen=True)

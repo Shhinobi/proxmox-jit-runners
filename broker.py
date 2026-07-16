@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 from .config import BrokerConfig, CacheConfig
 from .telemetry import span
@@ -61,3 +62,22 @@ class BrokerClient:
         if not repos:
             raise BrokerError("sync-allowlist requires at least one repository")
         return await self._run(f"sync-allowlist {repos}")
+
+    async def cache_list(self) -> dict[str, Any]:
+        raw = await self._run("cache-list")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise BrokerError(f"cache-list returned non-JSON: {raw[:300]}") from exc
+        if not isinstance(data, dict):
+            raise BrokerError("cache-list returned invalid payload")
+        return data
+
+    async def cache_purge(self, repository: str) -> str:
+        return await self._run(f"cache-purge {repository}")
+
+    async def cache_rename(self, from_repository: str, to_repository: str) -> str:
+        return await self._run(f"cache-rename {from_repository} {to_repository}")
+
+    async def cache_gc(self, min_age_days: int = 0) -> str:
+        return await self._run(f"cache-gc {int(min_age_days)}")

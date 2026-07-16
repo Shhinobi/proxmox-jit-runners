@@ -618,7 +618,20 @@ class Orchestrator:
         if not self.settings.shadow_mode and not self.draining:
             await self._replenish_warm_pool()
             await self._replenish_pool()
+        await self._maybe_gc_orphan_cache()
         await self._update_metrics()
+
+    async def _maybe_gc_orphan_cache(self) -> None:
+        """Phase 3: purge allowlist orphans older than cache.gc_orphan_days."""
+        days = int(self.settings.cache.gc_orphan_days or 0)
+        if days <= 0:
+            return
+        try:
+            result = await self.broker.cache_gc(days)
+            if result and "purged=0" not in result:
+                self.log("info", "cache", f"auto GC: {result}", min_age_days=days)
+        except Exception as exc:  # noqa: BLE001 — reconcile must continue
+            self.log("warn", "cache", f"auto GC failed: {exc}", min_age_days=days)
 
     async def _reconcile_warm_instance(self, instance: dict[str, Any]) -> None:
         """Health-check warm runners and retire orphans after policy renames."""

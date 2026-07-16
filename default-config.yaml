@@ -47,6 +47,9 @@ cache:
   mount_path: /cache
   max_usage_percent: 80
   quota_gb: 40
+  # Purge orphan cache dirs (not in allowlist) older than N days on reconcile.
+  # Set 0 to disable automatic GC; dashboard purge/gc still work.
+  gc_orphan_days: 7
 
 capacity:
   max_active: 2
