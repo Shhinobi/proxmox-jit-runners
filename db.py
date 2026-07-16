@@ -413,19 +413,40 @@ class Database:
         clauses: list[str] = []
         params: list[Any] = []
         if status:
-            clauses.append("status = ?")
+            clauses.append("i.status = ?")
             params.append(status)
         if repository:
-            clauses.append("LOWER(repository) = LOWER(?)")
+            clauses.append("LOWER(i.repository) = LOWER(?)")
             params.append(repository)
         if mode:
-            clauses.append("mode = ?")
+            clauses.append("i.mode = ?")
             params.append(mode)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        return await self._fetchall(
-            f"SELECT * FROM instances {where} ORDER BY vmid",
+        rows = await self._fetchall(
+            f"""
+            SELECT
+              i.id, i.vmid, i.ip_address, i.repository, i.mode, i.runner_name,
+              i.status, i.job_id, i.created_at, i.updated_at, i.last_used_at,
+              j.run_id AS job_run_id,
+              j.repository AS job_repository
+            FROM instances i
+            LEFT JOIN jobs j ON j.job_id = i.job_id
+            {where}
+            ORDER BY i.vmid
+            """,
             tuple(params),
         )
+        for row in rows:
+            job_id = row.get("job_id")
+            run_id = row.pop("job_run_id", None)
+            job_repo = row.pop("job_repository", None)
+            repo = str(job_repo or row.get("repository") or "")
+            if repo and run_id and job_id:
+                row["github_run_url"] = f"https://github.com/{repo}/actions/runs/{run_id}"
+                row["github_job_url"] = (
+                    f"https://github.com/{repo}/actions/runs/{run_id}/job/{job_id}"
+                )
+        return rows
 
     async def list_deliveries(
         self,
