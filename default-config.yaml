@@ -71,13 +71,3 @@ repositories:
     allowed_modes: [ephemeral, pool, persistent]
     allowed_events: [push, workflow_dispatch, schedule]
     required_labels: [self-hosted, proxmox-lxc, crossbuild]
-  # Staging repo for pre-cutover workflow validation (no dedicated warm).
-  # pull_request is allowed here only for migration CI validation; production
-  # example-app keeps pull_request blocked.
-  OldOwner/example-app-Temp:
-    github_installation: acme-app
-    default_mode: pool
-    warm_capacity: 0
-    allowed_modes: [ephemeral, pool, persistent]
-    allowed_events: [push, workflow_dispatch, schedule, pull_request]
-    required_labels: [self-hosted, proxmox-lxc, crossbuild]
