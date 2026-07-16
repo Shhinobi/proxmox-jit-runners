@@ -3,9 +3,38 @@
     source: null,
     filters: { repository: "", status: "", mode: "" },
     lastSnapshot: null,
+    toastTimer: null,
+    actionInFlight: false,
   };
 
   const $ = (id) => document.getElementById(id);
+
+  function showToast(kind, title, body, holdMs = 8000) {
+    const toast = $("toast");
+    toast.className = `toast ${kind || "ok"}`;
+    toast.innerHTML = `
+      <div>
+        <div class="toast-title">${escapeHtml(title)}</div>
+        <div class="toast-body">${escapeHtml(body || "")}</div>
+      </div>
+      <button type="button" class="toast-close" aria-label="Dismiss">×</button>
+    `;
+    toast.querySelector(".toast-close").addEventListener("click", hideToast);
+    if (state.toastTimer) clearTimeout(state.toastTimer);
+    if (holdMs > 0) {
+      state.toastTimer = setTimeout(hideToast, holdMs);
+    }
+  }
+
+  function hideToast() {
+    const toast = $("toast");
+    toast.className = "toast hidden";
+    toast.innerHTML = "";
+    if (state.toastTimer) {
+      clearTimeout(state.toastTimer);
+      state.toastTimer = null;
+    }
+  }
 
   function escapeHtml(value) {
     return String(value ?? "")
@@ -258,7 +287,26 @@
 
   function applySnapshot(snapshot) {
     state.lastSnapshot = snapshot;
-    renderOverview(snapshot.overview || {});
+    // Avoid clobbering button state while an admin action is running.
+    if (!state.actionInFlight) {
+      renderOverview(snapshot.overview || {});
+    } else {
+      const caps = snapshot.overview?.capacity || {};
+      $("badges").innerHTML = [
+        badge(snapshot.overview?.ready ? "ready" : "not ready", snapshot.overview?.ready ? "ok" : "bad"),
+        badge(snapshot.overview?.shadow_mode ? "shadow" : "live", snapshot.overview?.shadow_mode ? "warn" : "ok"),
+        badge(snapshot.overview?.drain ? "drain" : "accepting", snapshot.overview?.drain ? "warn" : "ok"),
+        badge(`node ${snapshot.overview?.proxmox?.node || "?"}`, "info"),
+      ].join("");
+      $("cards").innerHTML = [
+        card("Queue", caps.queued ?? 0),
+        card("Active", `${caps.active ?? 0}/${caps.max_active ?? "?"}`),
+        card("Warm ready", caps.warm_ready ?? 0),
+        card("Pool ready", `${caps.pool_ready ?? 0}/${caps.pool_size ?? "?"}`),
+        card("Delete failed", caps.delete_failed ?? 0),
+        card("Oldest queued", fmtAge(caps.oldest_queued_job_age_seconds)),
+      ].join("");
+    }
     renderAlerts(snapshot.alerts || []);
     renderInstances(snapshot.instances || []);
     renderJobs(snapshot.jobs || []);
@@ -266,7 +314,9 @@
     renderPolicies(snapshot.policies || {});
     renderMetrics(snapshot.metrics || {});
     renderDurationChart(snapshot.job_durations || []);
-    $("refresh-meta").textContent = `SSE live · ${new Date().toLocaleTimeString()}`;
+    if (!state.actionInFlight) {
+      $("refresh-meta").textContent = `SSE live · ${new Date().toLocaleTimeString()}`;
+    }
   }
 
   function connectSSE() {
@@ -289,19 +339,80 @@
     };
   }
 
-  async function postAdmin(path) {
+  function summarizeReconcile(body) {
+    const beforeJobs = Object.fromEntries(
+      ((body.before || {}).jobs || []).map((r) => [r.status, r.total])
+    );
+    const afterJobs = Object.fromEntries(
+      ((body.after || {}).jobs || []).map((r) => [r.status, r.total])
+    );
+    const beforeInst = ((body.before || {}).instances || [])
+      .map((r) => `${r.mode}/${r.status}=${r.total}`)
+      .join(", ");
+    const afterInst = ((body.after || {}).instances || [])
+      .map((r) => `${r.mode}/${r.status}=${r.total}`)
+      .join(", ");
+    return [
+      `jobs before: ${JSON.stringify(beforeJobs)}`,
+      `jobs after:  ${JSON.stringify(afterJobs)}`,
+      `instances before: ${beforeInst || "—"}`,
+      `instances after:  ${afterInst || "—"}`,
+    ].join("\n");
+  }
+
+  async function postAdmin(path, label) {
     const buttons = [$("btn-drain"), $("btn-resume"), $("btn-reconcile")];
-    buttons.forEach((b) => (b.disabled = true));
+    const actionKey = path.split("/").pop(); // drain|resume|reconcile
+    const active = buttons.find((b) => b.id === `btn-${actionKey}`);
+    state.actionInFlight = true;
+    buttons.forEach((b) => {
+      b.disabled = true;
+      b.classList.remove("busy");
+    });
+    if (active) active.classList.add("busy");
+    showToast("warn", `${label}…`, "Aguardando resposta do orchestrator.", 0);
+    $("refresh-meta").textContent = `${label} in progress…`;
     try {
-      const response = await fetch(path, { method: "POST", headers: { Accept: "application/json" } });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const body = await response.json();
-      $("refresh-meta").textContent = `admin ok · ${JSON.stringify(body)}`;
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { Accept: "application/json" },
+      });
+      const text = await response.text();
+      let body = {};
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch {
+        body = { raw: text };
+      }
+      if (!response.ok) {
+        throw new Error(body.message || body.detail || `HTTP ${response.status}`);
+      }
+
+      let detail = body.message || JSON.stringify(body);
+      if (body.action === "reconcile") {
+        detail = `${body.message || "Reconcile finished."}\n${summarizeReconcile(body)}`;
+      } else if (body.action === "drain" || body.action === "resume") {
+        detail = `${body.message || ""}\ndrain=${body.drain} · marker=${body.marker || "—"}`;
+      }
+      showToast("ok", `${label} concluído`, detail, 12000);
+      $("refresh-meta").textContent = `${label} ok · ${new Date().toLocaleTimeString()}`;
+
+      // Pull a fresh snapshot once so badges reflect the new state immediately.
+      const snap = await fetch(`/api/v1/snapshot?${queryString()}`, {
+        headers: { Accept: "application/json" },
+      });
+      if (snap.ok) applySnapshot(await snap.json());
     } catch (error) {
-      $("refresh-meta").textContent = `admin error: ${error.message}`;
+      showToast("bad", `${label} falhou`, String(error.message || error), 15000);
+      $("refresh-meta").textContent = `${label} error: ${error.message}`;
     } finally {
-      // snapshot will refresh button states
-      connectSSE();
+      state.actionInFlight = false;
+      buttons.forEach((b) => b.classList.remove("busy"));
+      if (state.lastSnapshot?.overview) renderOverview(state.lastSnapshot.overview);
+      // Keep SSE alive; reconnect only if it died.
+      if (!state.source || state.source.readyState === EventSource.CLOSED) {
+        connectSSE();
+      }
     }
   }
 
@@ -334,12 +445,20 @@
 
   function setupAdmin() {
     $("btn-drain").addEventListener("click", () => {
-      if (confirm("Enable drain? New jobs will stay queued until resume.")) {
-        postAdmin("/api/v1/admin/drain");
+      if (confirm("Ativar drain? Novos jobs ficam na fila até Resume.")) {
+        postAdmin("/api/v1/admin/drain", "Drain");
       }
     });
-    $("btn-resume").addEventListener("click", () => postAdmin("/api/v1/admin/resume"));
-    $("btn-reconcile").addEventListener("click", () => postAdmin("/api/v1/admin/reconcile"));
+    $("btn-resume").addEventListener("click", () => {
+      if (confirm("Desativar drain e voltar a aceitar jobs?")) {
+        postAdmin("/api/v1/admin/resume", "Resume");
+      }
+    });
+    $("btn-reconcile").addEventListener("click", () => {
+      if (confirm("Rodar reconcile agora (cleanup + reposição pool/warm)?")) {
+        postAdmin("/api/v1/admin/reconcile", "Reconcile");
+      }
+    });
   }
 
   setupTabs();
