@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from .api import build_overview, public_policies, ui_directory
+from .api import (
+    build_dashboard_snapshot,
+    build_overview,
+    metrics_summary,
+    public_policies,
+    set_drain,
+    ui_directory,
+)
 from .broker import BrokerClient
 from .config import Settings, load_settings
 from .db import Database
@@ -43,7 +51,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             await orchestrator.stop()
 
-    app = FastAPI(title="Proxmox JIT Runner Orchestrator", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Proxmox JIT Runner Orchestrator", version="0.2.0", lifespan=lifespan)
     configure_telemetry(app)
     app.state.orchestrator = orchestrator
     app.state.settings = cfg
@@ -106,37 +114,124 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await build_overview(orchestrator, cfg)
 
     @app.get("/api/v1/instances")
-    async def api_instances() -> list[dict[str, object]]:
-        return await orchestrator.db.list_instances()
+    async def api_instances(
+        status_filter: str | None = Query(default=None, alias="status"),
+        repository: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
+    ) -> list[dict[str, object]]:
+        return await orchestrator.db.list_instances(
+            status=status_filter, repository=repository, mode=mode
+        )
 
     @app.get("/api/v1/jobs")
     async def api_jobs(
         limit: int = Query(default=50, ge=1, le=200),
         status_filter: str | None = Query(default=None, alias="status"),
+        repository: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
     ) -> list[dict[str, object]]:
-        return await orchestrator.db.list_jobs(limit=limit, status=status_filter)
+        return await orchestrator.db.list_jobs(
+            limit=limit, status=status_filter, repository=repository, mode=mode
+        )
 
     @app.get("/api/v1/deliveries")
-    async def api_deliveries(limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, object]]:
-        return await orchestrator.db.list_deliveries(limit=limit)
+    async def api_deliveries(
+        limit: int = Query(default=50, ge=1, le=200),
+        reason: str | None = Query(default=None),
+        accepted: bool | None = Query(default=None),
+    ) -> list[dict[str, object]]:
+        return await orchestrator.db.list_deliveries(
+            limit=limit, reason=reason, accepted=accepted
+        )
 
     @app.get("/api/v1/policies")
     async def api_policies() -> dict[str, object]:
         return public_policies(cfg)
 
+    @app.get("/api/v1/metrics-summary")
+    async def api_metrics_summary() -> dict[str, object]:
+        return metrics_summary()
+
+    @app.get("/api/v1/job-durations")
+    async def api_job_durations(
+        limit: int = Query(default=30, ge=1, le=100),
+    ) -> list[dict[str, object]]:
+        return await orchestrator.db.recent_job_durations(limit=limit)
+
+    @app.get("/api/v1/snapshot")
+    async def api_snapshot(
+        limit: int = Query(default=50, ge=1, le=200),
+        status_filter: str | None = Query(default=None, alias="status"),
+        repository: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
+    ) -> dict[str, object]:
+        return await build_dashboard_snapshot(
+            orchestrator,
+            cfg,
+            job_limit=limit,
+            status=status_filter,
+            repository=repository,
+            mode=mode,
+        )
+
+    @app.get("/api/v1/events")
+    async def api_events(
+        request: Request,
+        interval: float = Query(default=3.0, ge=1.0, le=30.0),
+        limit: int = Query(default=50, ge=1, le=200),
+        status_filter: str | None = Query(default=None, alias="status"),
+        repository: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
+    ) -> StreamingResponse:
+        async def event_stream():
+            while True:
+                if await request.is_disconnected():
+                    break
+                snapshot = await build_dashboard_snapshot(
+                    orchestrator,
+                    cfg,
+                    job_limit=limit,
+                    status=status_filter,
+                    repository=repository,
+                    mode=mode,
+                )
+                payload = json.dumps(snapshot, separators=(",", ":"), default=str)
+                yield f"event: snapshot\ndata: {payload}\n\n"
+                await asyncio.sleep(interval)
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/api/v1/admin/drain")
+    async def admin_drain() -> dict[str, object]:
+        return set_drain(True)
+
+    @app.post("/api/v1/admin/resume")
+    async def admin_resume() -> dict[str, object]:
+        return set_drain(False)
+
+    @app.post("/api/v1/admin/reconcile")
+    async def admin_reconcile() -> dict[str, object]:
+        await orchestrator.reconcile()
+        return {"ok": True, "drain": orchestrator.draining}
+
     ui_dir = ui_directory()
     if ui_dir.is_dir():
         @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
         async def root_redirect() -> RedirectResponse:
-            # Dedicated dashboard hosts (runners.lan / runners.kyo) land on /.
-            # Public webhook host is path-locked to /webhooks/github in Traefik.
             return RedirectResponse(url="/ui/", status_code=307)
 
         @app.api_route("/ui", methods=["GET", "HEAD"], include_in_schema=False)
         async def ui_redirect() -> RedirectResponse:
             return RedirectResponse(url="/ui/", status_code=307)
 
-        # Mount last so API routes take precedence. html=True serves index.html at /ui/.
         app.mount("/ui", StaticFiles(directory=str(ui_dir), html=True), name="ui")
 
     return app
