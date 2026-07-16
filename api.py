@@ -53,6 +53,9 @@ async def apply_repository_policies(
     orchestrator: Orchestrator,
     repositories: dict[str, Any],
     installations: dict[str, Any] | None = None,
+    *,
+    cache_renames: list[dict[str, str]] | None = None,
+    purge_orphan_cache: bool = False,
 ) -> dict[str, Any]:
     """Validate, sync broker allowlist, persist, and hot-reload policies."""
     try:
@@ -66,6 +69,32 @@ async def apply_repository_policies(
     except ConfigError as exc:
         raise ValueError(str(exc)) from exc
 
+    old_repos = set(orchestrator.settings.repositories.keys())
+    new_repos = set(parsed.keys())
+
+    cache_ops: list[str] = []
+    # Explicit renames from the UI (e.g. MetalDevops/X → JustShinobi/X).
+    for item in cache_renames or []:
+        src = str(item.get("from") or "").strip()
+        dst = str(item.get("to") or "").strip()
+        if not src or not dst or src == dst:
+            continue
+        try:
+            result = await orchestrator.broker.cache_rename(src, dst)
+            cache_ops.append(result)
+            orchestrator.log(
+                "info",
+                "cache",
+                f"renamed cache {src} → {dst}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            cache_ops.append(f"rename {src}→{dst} failed: {exc}")
+            orchestrator.log(
+                "warn",
+                "cache",
+                f"cache rename failed {src} → {dst}: {exc}",
+            )
+
     broker_result = await orchestrator.broker.sync_allowlist(list(parsed.keys()))
     try:
         new_settings = save_repository_policies(
@@ -74,6 +103,22 @@ async def apply_repository_policies(
     except ConfigError as exc:
         raise ValueError(str(exc)) from exc
     orchestrator.settings = new_settings
+
+    removed = sorted(old_repos - new_repos, key=str.casefold)
+    if purge_orphan_cache and removed:
+        for repo in removed:
+            try:
+                result = await orchestrator.broker.cache_purge(repo)
+                cache_ops.append(result)
+                orchestrator.log("info", "cache", f"purged removed-policy cache {repo}")
+            except Exception as exc:  # noqa: BLE001
+                cache_ops.append(f"purge {repo} failed: {exc}")
+                orchestrator.log(
+                    "warn",
+                    "cache",
+                    f"purge removed-policy cache failed {repo}: {exc}",
+                )
+
     # Retire orphan warms (e.g. after handle rename) and replenish under new names.
     try:
         await orchestrator.reconcile()
@@ -99,6 +144,78 @@ async def apply_repository_policies(
             "Broker allowlist on pve02 was updated automatically. "
             "GitHub App access must still include each repository."
         ),
+        "cache_ops": cache_ops,
+        "removed_repositories": removed,
+    }
+
+
+async def list_cache_inventory(orchestrator: Orchestrator) -> dict[str, Any]:
+    data = await orchestrator.broker.cache_list()
+    data["gc_orphan_days"] = int(orchestrator.settings.cache.gc_orphan_days)
+    return data
+
+
+async def purge_cache_repository(
+    orchestrator: Orchestrator, repository: str
+) -> dict[str, Any]:
+    repo = repository.strip()
+    if "/" not in repo:
+        raise ValueError("repository must be OWNER/NAME")
+    # Refuse purge of active policy repos unless explicitly still allowed —
+    # operator may purge active cache (cold rebuild); warn only.
+    active = repo.casefold() in {
+        name.casefold() for name in orchestrator.settings.repositories
+    }
+    result = await orchestrator.broker.cache_purge(repo)
+    orchestrator.log(
+        "warn" if active else "info",
+        "cache",
+        f"purged cache {repo}" + (" (active policy)" if active else " (orphan)"),
+    )
+    return {
+        "ok": True,
+        "action": "cache-purge",
+        "repository": repo,
+        "active_policy": active,
+        "message": result,
+    }
+
+
+async def rename_cache_repository(
+    orchestrator: Orchestrator, from_repo: str, to_repo: str
+) -> dict[str, Any]:
+    src = from_repo.strip()
+    dst = to_repo.strip()
+    if src == dst:
+        raise ValueError("from and to repositories must differ")
+    result = await orchestrator.broker.cache_rename(src, dst)
+    orchestrator.log("info", "cache", f"renamed cache {src} → {dst}")
+    return {
+        "ok": True,
+        "action": "cache-rename",
+        "from": src,
+        "to": dst,
+        "message": result,
+    }
+
+
+async def gc_orphan_cache(
+    orchestrator: Orchestrator, min_age_days: int | None = None
+) -> dict[str, Any]:
+    days = (
+        int(orchestrator.settings.cache.gc_orphan_days)
+        if min_age_days is None
+        else int(min_age_days)
+    )
+    if days < 0:
+        raise ValueError("min_age_days must be non-negative")
+    result = await orchestrator.broker.cache_gc(days)
+    orchestrator.log("info", "cache", f"cache-gc: {result}")
+    return {
+        "ok": True,
+        "action": "cache-gc",
+        "min_age_days": days,
+        "message": result,
     }
 
 

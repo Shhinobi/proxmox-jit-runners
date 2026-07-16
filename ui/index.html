@@ -87,6 +87,7 @@
     <button type="button" class="tab" data-tab="jobs">Jobs</button>
     <button type="button" class="tab" data-tab="deliveries">Webhooks</button>
     <button type="button" class="tab" data-tab="logs">Logs</button>
+    <button type="button" class="tab" data-tab="cache">Cache</button>
     <button type="button" class="tab" data-tab="policies">Policies</button>
   </nav>
 
@@ -131,6 +132,29 @@
       <div class="logs-wrap" id="logs-wrap">
         <div class="logs-empty muted" id="logs-empty">Aguardando eventos do orchestrator…</div>
         <div id="logs-list" class="logs-list"></div>
+      </div>
+    </section>
+    <section id="panel-cache" class="panel">
+      <div class="policy-toolbar">
+        <button type="button" id="btn-cache-refresh" class="btn">Refresh</button>
+        <button type="button" id="btn-cache-gc" class="btn warn">GC orphans</button>
+        <span class="policy-status muted" id="cache-status" aria-live="polite"></span>
+      </div>
+      <p class="policy-hint muted" id="cache-summary">Cache inventory loads when you open this tab.</p>
+      <div class="table-wrap"><table id="table-cache"></table></div>
+      <div class="cache-rename panel-box" style="margin-top:0.75rem">
+        <h2>Rename cache (handle/repo move)</h2>
+        <div class="policy-grid">
+          <label>From
+            <input id="cache-rename-from" type="text" placeholder="MetalDevops/NinjaCrawler" />
+          </label>
+          <label>To
+            <input id="cache-rename-to" type="text" placeholder="JustShinobi/NinjaCrawler" />
+          </label>
+        </div>
+        <div class="policy-toolbar" style="margin-top:0.55rem">
+          <button type="button" id="btn-cache-rename" class="btn ok">Rename cache</button>
+        </div>
       </div>
     </section>
     <section id="panel-policies" class="panel">

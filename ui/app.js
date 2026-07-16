@@ -897,7 +897,16 @@
       }
       if (!response.ok) throw new Error(formatApiError(body, response.status));
       hydratePolicies(body.policies || { repositories, installations }, { force: true });
-      showToast("ok", "Policies salvas", `${body.message || "OK"}\n${body.broker_note || ""}`, 15000);
+      const cacheNote =
+        Array.isArray(body.cache_ops) && body.cache_ops.length
+          ? `\ncache: ${body.cache_ops.join("; ")}`
+          : "";
+      showToast(
+        "ok",
+        "Policies salvas",
+        `${body.message || "OK"}\n${body.broker_note || ""}${cacheNote}`,
+        15000
+      );
       setPolicyStatus("ok", "Salvo");
     } catch (error) {
       showToast("bad", "Falha ao salvar policies", String(error.message || error), 15000);
@@ -1116,6 +1125,191 @@
     }
   }
 
+  function fmtBytes(n) {
+    const v = Number(n) || 0;
+    if (v < 1024) return `${v} B`;
+    if (v < 1024 ** 2) return `${(v / 1024).toFixed(1)} KiB`;
+    if (v < 1024 ** 3) return `${(v / 1024 ** 2).toFixed(1)} MiB`;
+    return `${(v / 1024 ** 3).toFixed(2)} GiB`;
+  }
+
+  function setCacheStatus(kind, text) {
+    const el = $("cache-status");
+    if (!el) return;
+    el.className = `policy-status ${kind || "muted"}`;
+    el.textContent = text || "";
+  }
+
+  function renderCacheInventory(data) {
+    const repos = data.repositories || [];
+    const summary = $("cache-summary");
+    if (summary) {
+      summary.innerHTML = `Volume <code>${escapeHtml(data.root || "/srv/runner-cache")}</code> · used ${escapeHtml(fmtBytes(data.used_bytes))} / ${escapeHtml(fmtBytes(data.total_bytes))} (${escapeHtml(data.usage_percent)}%, max ${escapeHtml(data.max_usage_percent)}%) · soft quota ${escapeHtml(data.quota_gb)} GiB/repo · auto-GC orphans &gt; ${escapeHtml(data.gc_orphan_days ?? "?")}d`;
+    }
+    const rows = repos
+      .map((item) => {
+        const orphan = item.orphan || !item.allowed;
+        return `<tr class="${orphan ? "row-bad" : ""}">
+          <td class="mono">${escapeHtml(item.repository)}</td>
+          <td>${escapeHtml(fmtBytes(item.size_bytes))}</td>
+          <td class="muted">${escapeHtml(fmtTs(item.mtime))}</td>
+          <td><span class="status ${orphan ? "failed" : "ready"}">${orphan ? "orphan" : "allowed"}</span></td>
+          <td>
+            <button type="button" class="btn warn btn-cache-purge" data-repo="${escapeHtml(item.repository)}">Purge</button>
+          </td>
+        </tr>`;
+      })
+      .join("");
+    renderTable(
+      $("table-cache"),
+      ["Repository", "Size", "Modified", "Status", "Actions"],
+      rows
+    );
+    document.querySelectorAll(".btn-cache-purge").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const repo = button.getAttribute("data-repo") || "";
+        const ok = await confirmAction({
+          kind: "bad",
+          kicker: "Cache · destrutivo",
+          title: `Purge cache ${repo}?`,
+          body: `Apaga /srv/runner-cache/${repo} no pve02.\nRecusa se algum CT JIT tiver o path montado.\nRebuild do cache no próximo job.`,
+          confirmLabel: "Purge",
+          cancelLabel: "Cancelar",
+        });
+        if (!ok) return;
+        setCacheStatus("warn", `Purging ${repo}…`);
+        try {
+          const response = await fetch("/api/v1/admin/cache/purge", {
+            method: "POST",
+            headers: { Accept: "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify({ repository: repo }),
+          });
+          const text = await response.text();
+          let body = {};
+          try {
+            body = text ? JSON.parse(text) : {};
+          } catch {
+            body = { detail: text };
+          }
+          if (!response.ok) throw new Error(formatApiError(body, response.status));
+          showToast("ok", "Cache purged", body.message || repo, 10000);
+          setCacheStatus("ok", `Purged ${repo}`);
+          await loadCacheInventory();
+        } catch (error) {
+          showToast("bad", "Purge falhou", String(error.message || error), 12000);
+          setCacheStatus("bad", "Purge error");
+        }
+      });
+    });
+  }
+
+  async function loadCacheInventory() {
+    setCacheStatus("warn", "Loading…");
+    try {
+      const response = await fetch("/api/v1/cache", { headers: { Accept: "application/json" } });
+      const text = await response.text();
+      let body = {};
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch {
+        body = { detail: text };
+      }
+      if (!response.ok) throw new Error(formatApiError(body, response.status));
+      renderCacheInventory(body);
+      const orphans = (body.repositories || []).filter((r) => r.orphan).length;
+      setCacheStatus(
+        orphans ? "warn" : "ok",
+        `${(body.repositories || []).length} repo cache(s)${orphans ? ` · ${orphans} orphan` : ""}`
+      );
+    } catch (error) {
+      showToast("bad", "Falha ao listar cache", String(error.message || error), 12000);
+      setCacheStatus("bad", "Load failed");
+    }
+  }
+
+  function setupCacheTab() {
+    const refresh = $("btn-cache-refresh");
+    const gcBtn = $("btn-cache-gc");
+    const renameBtn = $("btn-cache-rename");
+    if (refresh) refresh.addEventListener("click", () => loadCacheInventory());
+    if (gcBtn) {
+      gcBtn.addEventListener("click", async () => {
+        const ok = await confirmAction({
+          kind: "warn",
+          kicker: "Cache GC",
+          title: "Garbage-collect orphan caches?",
+          body: "Apaga diretórios em /srv/runner-cache que não estão no allowlist do broker.\nUsa o min age de gc_orphan_days da config (default 7; 0 = todos).\nNão mexe em caches de policies ativas.",
+          confirmLabel: "Run GC",
+          cancelLabel: "Cancelar",
+        });
+        if (!ok) return;
+        setCacheStatus("warn", "GC running…");
+        try {
+          const response = await fetch("/api/v1/admin/cache/gc", {
+            method: "POST",
+            headers: { Accept: "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+          const text = await response.text();
+          let body = {};
+          try {
+            body = text ? JSON.parse(text) : {};
+          } catch {
+            body = { detail: text };
+          }
+          if (!response.ok) throw new Error(formatApiError(body, response.status));
+          showToast("ok", "Cache GC", body.message || "done", 12000);
+          setCacheStatus("ok", body.message || "GC done");
+          await loadCacheInventory();
+        } catch (error) {
+          showToast("bad", "GC falhou", String(error.message || error), 12000);
+          setCacheStatus("bad", "GC error");
+        }
+      });
+    }
+    if (renameBtn) {
+      renameBtn.addEventListener("click", async () => {
+        const from = ($("cache-rename-from")?.value || "").trim();
+        const to = ($("cache-rename-to")?.value || "").trim();
+        if (!from || !to) {
+          showToast("bad", "Rename inválido", "Preencha From e To (Owner/Repo).", 8000);
+          return;
+        }
+        const ok = await confirmAction({
+          kind: "ok",
+          kicker: "Cache rename",
+          title: "Renomear cache?",
+          body: `${from}\n→ ${to}\n\nMove o diretório no pve02. Destino deve estar vazio/quase vazio. Source não pode estar montado em CT.`,
+          confirmLabel: "Rename",
+          cancelLabel: "Cancelar",
+        });
+        if (!ok) return;
+        setCacheStatus("warn", "Renaming…");
+        try {
+          const response = await fetch("/api/v1/admin/cache/rename", {
+            method: "POST",
+            headers: { Accept: "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify({ from, to }),
+          });
+          const text = await response.text();
+          let body = {};
+          try {
+            body = text ? JSON.parse(text) : {};
+          } catch {
+            body = { detail: text };
+          }
+          if (!response.ok) throw new Error(formatApiError(body, response.status));
+          showToast("ok", "Cache renamed", body.message || `${from} → ${to}`, 12000);
+          setCacheStatus("ok", body.message || "renamed");
+          await loadCacheInventory();
+        } catch (error) {
+          showToast("bad", "Rename falhou", String(error.message || error), 12000);
+          setCacheStatus("bad", "Rename error");
+        }
+      });
+    }
+  }
+
   function setupTabs() {
     document.querySelectorAll(".tab").forEach((button) => {
       button.addEventListener("click", () => {
@@ -1123,6 +1317,9 @@
         document.querySelectorAll(".panel").forEach((el) => el.classList.remove("active"));
         button.classList.add("active");
         $(`panel-${button.dataset.tab}`).classList.add("active");
+        if (button.dataset.tab === "cache") {
+          loadCacheInventory();
+        }
       });
     });
   }
@@ -1207,6 +1404,7 @@
   setupLogFilters();
   setupAdmin();
   setupPolicyEditor();
+  setupCacheTab();
   connectSSE();
   window.addEventListener("resize", () => {
     if (state.lastSnapshot) renderDurationChart(state.lastSnapshot.job_durations || []);

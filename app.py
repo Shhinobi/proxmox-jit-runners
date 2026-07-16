@@ -14,9 +14,13 @@ from .api import (
     apply_repository_policies,
     build_dashboard_snapshot,
     build_overview,
+    gc_orphan_cache,
+    list_cache_inventory,
     metrics_summary,
     public_policies,
+    purge_cache_repository,
     recycle_ready,
+    rename_cache_repository,
     set_drain,
     ui_directory,
 )
@@ -275,9 +279,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=400, detail="body.installations must be an object when provided"
             )
+        cache_renames = body.get("cache_renames") if isinstance(body, dict) else None
+        if cache_renames is not None and not isinstance(cache_renames, list):
+            raise HTTPException(
+                status_code=400, detail="body.cache_renames must be an array when provided"
+            )
+        purge_orphan_cache = bool(
+            body.get("purge_orphan_cache") if isinstance(body, dict) else False
+        )
         try:
             result = await apply_repository_policies(
-                orchestrator, repositories, installations=installations
+                orchestrator,
+                repositories,
+                installations=installations,
+                cache_renames=cache_renames,
+                purge_orphan_cache=purge_orphan_cache,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -288,8 +304,66 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = orchestrator.settings
         return result
 
+    @app.get("/api/v1/cache")
+    async def api_cache() -> dict[str, object]:
+        try:
+            return await list_cache_inventory(orchestrator)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/v1/admin/cache/purge")
+    async def admin_cache_purge(request: Request) -> dict[str, object]:
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        repository = body.get("repository") if isinstance(body, dict) else None
+        if not isinstance(repository, str) or not repository.strip():
+            raise HTTPException(status_code=400, detail="body.repository is required")
+        try:
+            return await purge_cache_repository(orchestrator, repository)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/v1/admin/cache/rename")
+    async def admin_cache_rename(request: Request) -> dict[str, object]:
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="JSON object required")
+        src = body.get("from")
+        dst = body.get("to")
+        if not isinstance(src, str) or not isinstance(dst, str):
+            raise HTTPException(status_code=400, detail="body.from and body.to are required")
+        try:
+            return await rename_cache_repository(orchestrator, src, dst)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/v1/admin/cache/gc")
+    async def admin_cache_gc(request: Request) -> dict[str, object]:
+        min_age_days: int | None = None
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and body.get("min_age_days") is not None:
+                min_age_days = int(body["min_age_days"])
+        except Exception:
+            min_age_days = None
+        try:
+            return await gc_orphan_cache(orchestrator, min_age_days=min_age_days)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     ui_dir = ui_directory()
-    asset_version = "20260716-6"
+    asset_version = "20260716-7"
     if ui_dir.is_dir():
         @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
         async def root_redirect() -> RedirectResponse:
