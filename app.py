@@ -289,7 +289,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return result
 
     ui_dir = ui_directory()
-    asset_version = "20260716-4"
+    asset_version = "20260716-5"
     if ui_dir.is_dir():
         @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
         async def root_redirect() -> RedirectResponse:
