@@ -15,6 +15,7 @@ from .api import (
     build_overview,
     metrics_summary,
     public_policies,
+    recycle_ready,
     set_drain,
     ui_directory,
 )
@@ -241,7 +242,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "after": after,
         }
 
+    @app.post("/api/v1/admin/recycle-ready")
+    async def admin_recycle_ready() -> dict[str, object]:
+        try:
+            return await recycle_ready(orchestrator)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     ui_dir = ui_directory()
+    asset_version = "20260716-2"
     if ui_dir.is_dir():
         @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
         async def root_redirect() -> RedirectResponse:
@@ -251,7 +260,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async def ui_redirect() -> RedirectResponse:
             return RedirectResponse(url="/ui/", status_code=307)
 
-        app.mount("/ui", StaticFiles(directory=str(ui_dir), html=True), name="ui")
+        @app.get("/ui/", include_in_schema=False)
+        async def ui_index() -> Response:
+            html = (ui_dir / "index.html").read_text(encoding="utf-8")
+            html = html.replace("styles.css", f"styles.css?v={asset_version}")
+            html = html.replace("app.js", f"app.js?v={asset_version}")
+            return Response(
+                content=html,
+                media_type="text/html; charset=utf-8",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        app.mount("/ui", StaticFiles(directory=str(ui_dir), html=False), name="ui")
 
     return app
 

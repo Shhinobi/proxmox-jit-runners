@@ -361,8 +361,13 @@
   }
 
   async function postAdmin(path, label) {
-    const buttons = [$("btn-drain"), $("btn-resume"), $("btn-reconcile")];
-    const actionKey = path.split("/").pop(); // drain|resume|reconcile
+    const buttons = [
+      $("btn-drain"),
+      $("btn-resume"),
+      $("btn-reconcile"),
+      $("btn-recycle-ready"),
+    ];
+    const actionKey = path.split("/").pop(); // drain|resume|reconcile|recycle-ready
     const active = buttons.find((b) => b.id === `btn-${actionKey}`);
     state.actionInFlight = true;
     buttons.forEach((b) => {
@@ -389,8 +394,12 @@
       }
 
       let detail = body.message || JSON.stringify(body);
-      if (body.action === "reconcile") {
-        detail = `${body.message || "Reconcile finished."}\n${summarizeReconcile(body)}`;
+      if (body.action === "reconcile" || body.action === "recycle-ready") {
+        const extra =
+          body.action === "recycle-ready" && body.scheduled != null
+            ? `scheduled=${body.scheduled}\n`
+            : "";
+        detail = `${body.message || "Done."}\n${extra}${summarizeReconcile(body)}`;
       } else if (body.action === "drain" || body.action === "resume") {
         detail = `${body.message || ""}\ndrain=${body.drain} · marker=${body.marker || "—"}`;
       }
@@ -457,6 +466,15 @@
     $("btn-reconcile").addEventListener("click", () => {
       if (confirm("Rodar reconcile agora (cleanup + reposição pool/warm)?")) {
         postAdmin("/api/v1/admin/reconcile", "Reconcile");
+      }
+    });
+    $("btn-recycle-ready").addEventListener("click", () => {
+      if (
+        confirm(
+          "Reciclar pool/warm ready agora?\nSó funciona se não houver instances em provisioning/running.\nOs clones ready serão destruídos e repostos."
+        )
+      ) {
+        postAdmin("/api/v1/admin/recycle-ready", "Recycle ready");
       }
     });
   }
