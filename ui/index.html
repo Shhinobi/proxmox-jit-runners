@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Runner Orchestrator</title>
+  <link rel="stylesheet" href="/ui/styles.css" />
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>Runner Orchestrator</h1>
+      <p class="sub">Proxmox JIT · estado ao vivo (somente leitura)</p>
+    </div>
+    <div class="badges" id="badges"></div>
+  </header>
+
+  <section class="cards" id="cards"></section>
+
+  <nav class="tabs" role="tablist">
+    <button type="button" class="tab active" data-tab="instances">Instances</button>
+    <button type="button" class="tab" data-tab="jobs">Jobs</button>
+    <button type="button" class="tab" data-tab="deliveries">Webhooks</button>
+    <button type="button" class="tab" data-tab="policies">Policies</button>
+  </nav>
+
+  <main>
+    <section id="panel-instances" class="panel active">
+      <div class="table-wrap"><table id="table-instances"></table></div>
+    </section>
+    <section id="panel-jobs" class="panel">
+      <div class="table-wrap"><table id="table-jobs"></table></div>
+    </section>
+    <section id="panel-deliveries" class="panel">
+      <div class="table-wrap"><table id="table-deliveries"></table></div>
+    </section>
+    <section id="panel-policies" class="panel">
+      <div class="table-wrap"><table id="table-policies"></table></div>
+    </section>
+  </main>
+
+  <footer>
+    <span id="refresh-meta">carregando…</span>
+    <span>Auth na borda (Authelia) · API <code>/api/v1/*</code></span>
+  </footer>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>
