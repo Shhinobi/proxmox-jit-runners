@@ -8,10 +8,7 @@ from prometheus_client import REGISTRY
 
 from .config import (
     ConfigError,
-    GitHubInstallation,
     Settings,
-    _load_yaml,
-    config_path,
     parse_repository_policies,
     repository_policy_to_dict,
     save_repository_policies,
@@ -55,35 +52,38 @@ def public_policies(settings: Settings) -> dict[str, Any]:
 async def apply_repository_policies(
     orchestrator: Orchestrator,
     repositories: dict[str, Any],
+    installations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Validate, sync broker allowlist, persist, and hot-reload repository policies."""
+    """Validate, sync broker allowlist, persist, and hot-reload policies."""
     try:
-        raw = _load_yaml(config_path())
-        installations = {
-            name: GitHubInstallation(
-                account=str(value["account"]),
-                installation_id=int(value["installation_id"]),
-                scope=str(value["scope"]),
-                runner_group_id=int(value.get("runner_group_id", 1)),
-            )
-            for name, value in raw["github"]["installations"].items()
-        }
-        parsed = parse_repository_policies(repositories, installations)
+        if installations is None:
+            effective_installations = orchestrator.settings.github.installations
+        else:
+            from .config import parse_github_installations
+
+            effective_installations = parse_github_installations(installations)
+        parsed = parse_repository_policies(repositories, effective_installations)
     except ConfigError as exc:
         raise ValueError(str(exc)) from exc
 
     broker_result = await orchestrator.broker.sync_allowlist(list(parsed.keys()))
     try:
-        new_settings = save_repository_policies(repositories)
+        new_settings = save_repository_policies(
+            repositories, installations=installations
+        )
     except ConfigError as exc:
         raise ValueError(str(exc)) from exc
     orchestrator.settings = new_settings
+    # GitHub client holds installation map indirectly via settings; tokens
+    # remain valid. Installation account/id changes take effect immediately.
+    inst_count = len(new_settings.github.installations)
     return {
         "ok": True,
         "action": "save-policies",
         "message": (
-            f"Saved {len(new_settings.repositories)} repository policy(ies), "
-            f"synced broker allowlist ({broker_result}), and reloaded."
+            f"Saved {len(new_settings.repositories)} repository policy(ies) and "
+            f"{inst_count} installation(s), synced broker allowlist "
+            f"({broker_result}), and reloaded."
         ),
         "policies": public_policies(new_settings),
         "broker_synced": True,

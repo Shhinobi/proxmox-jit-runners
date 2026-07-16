@@ -9,6 +9,7 @@
     confirmResolver: null,
     openLogIds: new Set(),
     policyDraft: null,
+    installationDraft: null,
     policyMeta: {
       mode_options: ["ephemeral", "pool", "persistent"],
       event_options: ["push", "workflow_dispatch", "schedule", "pull_request", "release"],
@@ -400,13 +401,23 @@
   }
 
   function defaultPolicy(installationName) {
+    const names = Object.keys(state.installationDraft || state.policyMeta.installations || {});
     return {
-      github_installation: installationName || Object.keys(state.policyMeta.installations)[0] || "",
+      github_installation: installationName || names[0] || "",
       default_mode: "ephemeral",
       warm_capacity: 0,
       allowed_modes: ["ephemeral", "pool", "persistent"],
       allowed_events: ["push", "workflow_dispatch", "schedule"],
       required_labels: ["self-hosted", "proxmox-lxc", "crossbuild"],
+    };
+  }
+
+  function defaultInstallation() {
+    return {
+      account: "",
+      installation_id: "",
+      scope: "repository",
+      runner_group_id: 1,
     };
   }
 
@@ -420,12 +431,32 @@
     if (!state.policyDraft) {
       state.policyDraft = JSON.parse(JSON.stringify(policies?.repositories || {}));
     }
+    if (!state.installationDraft) {
+      state.installationDraft = JSON.parse(JSON.stringify(policies?.installations || {}));
+    }
     const list = $("repo-list");
     list.innerHTML = Object.keys(policies?.repositories || {})
       .map((name) => `<option value="${escapeHtml(name)}"></option>`)
       .join("");
     $("policy-note").textContent = state.policyMeta.broker_note || "";
+    renderInstallationEditor();
     renderPolicyEditor();
+  }
+
+  function collectInstallationDraftFromDom() {
+    const cards = [...document.querySelectorAll(".install-card")];
+    const installations = {};
+    for (const card of cards) {
+      const key = card.querySelector('[data-field="install_key"]').value.trim();
+      if (!key) continue;
+      installations[key] = {
+        account: card.querySelector('[data-field="account"]').value.trim(),
+        installation_id: Number(card.querySelector('[data-field="installation_id"]').value || 0),
+        scope: card.querySelector('[data-field="scope"]').value,
+        runner_group_id: Number(card.querySelector('[data-field="runner_group_id"]').value || 1),
+      };
+    }
+    return installations;
   }
 
   function collectPolicyDraftFromDom() {
@@ -449,10 +480,79 @@
     return repositories;
   }
 
+  function renderInstallationEditor() {
+    const editor = $("install-editor");
+    if (!editor) return;
+    const draft = state.installationDraft || {};
+    const cards = Object.entries(draft)
+      .map(([key, inst], index) => {
+        const scope = inst.scope || "repository";
+        return `<article class="policy-card install-card" data-install-index="${index}">
+          <div class="policy-card-head">
+            <strong class="mono">Installation #${index + 1}</strong>
+            <button type="button" class="btn ghost btn-install-delete" data-key="${escapeHtml(key)}">Remove</button>
+          </div>
+          <div class="policy-grid">
+            <label>Key
+              <input data-field="install_key" value="${escapeHtml(key)}" placeholder="personal-or-org" />
+            </label>
+            <label>Account (handle/org)
+              <input data-field="account" value="${escapeHtml(inst.account || "")}" placeholder="acme" />
+            </label>
+            <label>Installation ID
+              <input data-field="installation_id" type="number" min="1" step="1" value="${escapeHtml(inst.installation_id ?? "")}" placeholder="1234567" />
+            </label>
+            <label>Scope
+              <select data-field="scope">
+                <option value="repository" ${scope === "repository" ? "selected" : ""}>repository</option>
+                <option value="organization" ${scope === "organization" ? "selected" : ""}>organization</option>
+              </select>
+            </label>
+            <label>Runner group ID
+              <input data-field="runner_group_id" type="number" min="1" step="1" value="${escapeHtml(inst.runner_group_id ?? 1)}" />
+            </label>
+          </div>
+        </article>`;
+      })
+      .join("");
+    editor.innerHTML =
+      cards ||
+      `<div class="empty">Nenhuma installation. Clique em Add installation (ex.: após rename de handle).</div>`;
+    editor.querySelectorAll(".btn-install-delete").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const card = button.closest(".install-card");
+        const keyInput = card?.querySelector('[data-field="install_key"]');
+        const key = (keyInput?.value || button.getAttribute("data-key") || "").trim();
+        const ok = await confirmAction({
+          kind: "bad",
+          kicker: "Installations",
+          title: "Remover installation?",
+          body: key
+            ? `A installation "${key}" sai do draft. Repositórios que a usam precisam de outra installation antes de salvar.`
+            : "A installation selecionada será removida do draft.",
+          confirmLabel: "Remover",
+          cancelLabel: "Manter",
+        });
+        if (!ok) return;
+        // Preserve sibling drafts before re-render.
+        state.installationDraft = collectInstallationDraftFromDom();
+        state.policyDraft = collectPolicyDraftFromDom();
+        delete state.installationDraft[key];
+        // also delete by DOM if key renamed mid-edit
+        card?.remove();
+        state.installationDraft = collectInstallationDraftFromDom();
+        renderInstallationEditor();
+        renderPolicyEditor();
+      });
+    });
+  }
+
   function renderPolicyEditor() {
     const editor = $("policy-editor");
     const draft = state.policyDraft || {};
-    const installationNames = Object.keys(state.policyMeta.installations);
+    // Prefer live installation draft (editable account) for option labels.
+    const liveInstalls = state.installationDraft || state.policyMeta.installations || {};
+    const installationNames = Object.keys(liveInstalls);
     const cards = Object.entries(draft)
       .map(([repo, policy], index) => {
         const modes = state.policyMeta.mode_options
@@ -473,11 +573,12 @@
               `<label class="inline"><input type="checkbox" data-field="required_labels" value="${escapeHtml(label)}" ${(policy.required_labels || []).includes(label) ? "checked" : ""}/> ${escapeHtml(label)}</label>`
           )
           .join("");
+        const selectedInstall = policy.github_installation || installationNames[0] || "";
         const installations = installationNames
-          .map(
-            (name) =>
-              `<option value="${escapeHtml(name)}" ${policy.github_installation === name ? "selected" : ""}>${escapeHtml(name)} (${escapeHtml(state.policyMeta.installations[name].account)})</option>`
-          )
+          .map((name) => {
+            const account = liveInstalls[name]?.account || "?";
+            return `<option value="${escapeHtml(name)}" ${selectedInstall === name ? "selected" : ""}>${escapeHtml(name)} · ${escapeHtml(account)}</option>`;
+          })
           .join("");
         const modeOptions = state.policyMeta.mode_options
           .map(
@@ -495,7 +596,7 @@
               <input data-field="repository" value="${escapeHtml(repo)}" placeholder="Owner/Name" />
             </label>
             <label>Installation
-              <select data-field="github_installation">${installations}</select>
+              <select data-field="github_installation">${installations || `<option value="">(adicione uma installation)</option>`}</select>
             </label>
             <label>Default mode
               <select data-field="default_mode">${modeOptions}</select>
@@ -528,21 +629,39 @@
         });
         if (!ok) return;
         card?.remove();
+        state.installationDraft = collectInstallationDraftFromDom();
         state.policyDraft = collectPolicyDraftFromDom();
+        renderInstallationEditor();
         renderPolicyEditor();
       });
     });
   }
 
   function setupPolicyEditor() {
-    $("btn-policy-add").addEventListener("click", () => {
+    $("btn-install-add").addEventListener("click", () => {
+      state.installationDraft = collectInstallationDraftFromDom();
       state.policyDraft = collectPolicyDraftFromDom();
-      let name = "Owner/NewRepo";
+      let name = "personal";
+      let i = 1;
+      while (state.installationDraft[name]) {
+        name = `personal-${i++}`;
+      }
+      state.installationDraft[name] = defaultInstallation();
+      renderInstallationEditor();
+      renderPolicyEditor();
+    });
+    $("btn-policy-add").addEventListener("click", () => {
+      state.installationDraft = collectInstallationDraftFromDom();
+      state.policyDraft = collectPolicyDraftFromDom();
+      const installs = state.installationDraft || {};
+      const firstAccount = Object.values(installs)[0]?.account || "Owner";
+      let name = `${firstAccount}/NewRepo`;
       let i = 1;
       while (state.policyDraft[name]) {
-        name = `Owner/NewRepo-${i++}`;
+        name = `${firstAccount}/NewRepo-${i++}`;
       }
       state.policyDraft[name] = defaultPolicy();
+      renderInstallationEditor();
       renderPolicyEditor();
     });
     $("btn-policy-reset").addEventListener("click", async () => {
@@ -550,34 +669,46 @@
         kind: "warn",
         kicker: "Policies",
         title: "Descartar alterações?",
-        body: "O draft local será restaurado a partir do servidor. Mudanças não salvas serão perdidas.",
+        body: "O draft de installations e repositórios será restaurado a partir do servidor. Mudanças não salvas serão perdidas.",
         confirmLabel: "Resetar draft",
         cancelLabel: "Continuar editando",
       });
       if (!ok) return;
-      const server = state.lastSnapshot?.policies?.repositories || {};
-      state.policyDraft = JSON.parse(JSON.stringify(server));
+      const server = state.lastSnapshot?.policies || {};
+      state.policyDraft = JSON.parse(JSON.stringify(server.repositories || {}));
+      state.installationDraft = JSON.parse(JSON.stringify(server.installations || {}));
+      renderInstallationEditor();
       renderPolicyEditor();
       showToast("info", "Policies reset", "Draft restaurado a partir do servidor.", 5000);
     });
     $("btn-policy-save").addEventListener("click", async () => {
+      const installations = collectInstallationDraftFromDom();
       const repositories = collectPolicyDraftFromDom();
+      if (!Object.keys(installations).length) {
+        showToast("bad", "Policies inválidas", "Mantenha ao menos uma GitHub installation.", 8000);
+        return;
+      }
       if (!Object.keys(repositories).length) {
         showToast("bad", "Policies inválidas", "Mantenha ao menos um repositório.", 8000);
         return;
       }
       const names = Object.keys(repositories);
+      const instNames = Object.keys(installations);
       const ok = await confirmAction({
         kind: "ok",
         kicker: "Policies",
         title: "Salvar e aplicar policies?",
-        body: `${names.length} repositório(s):\n${names.map((n) => `· ${n}`).join("\n")}\n\nGrava override, recarrega o orchestrator e sincroniza o allowlist do broker.`,
+        body: `${instNames.length} installation(s):\n${instNames
+          .map((n) => `· ${n} → ${installations[n].account} (id ${installations[n].installation_id})`)
+          .join("\n")}\n\n${names.length} repositório(s):\n${names
+          .map((n) => `· ${n}`)
+          .join("\n")}\n\nGrava override, recarrega o orchestrator e sincroniza o allowlist do broker.`,
         confirmLabel: "Salvar e aplicar",
         cancelLabel: "Cancelar",
       });
       if (!ok) return;
       state.actionInFlight = true;
-      showToast("warn", "Saving policies…", "Validando e gravando config.yaml", 0);
+      showToast("warn", "Saving policies…", "Validando installations + repositórios", 0);
       try {
         const response = await fetch("/api/v1/admin/policies", {
           method: "PUT",
@@ -585,7 +716,7 @@
             Accept: "application/json",
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ repositories }),
+          body: JSON.stringify({ repositories, installations }),
         });
         const text = await response.text();
         let body = {};
@@ -595,8 +726,9 @@
           body = { detail: text };
         }
         if (!response.ok) throw new Error(body.detail || body.message || `HTTP ${response.status}`);
-        state.policyDraft = JSON.parse(JSON.stringify(body.policies?.repositories || repositories));
-        syncPolicyDraftFromServer(body.policies || { repositories: state.policyDraft });
+        state.policyDraft = null;
+        state.installationDraft = null;
+        syncPolicyDraftFromServer(body.policies || { repositories, installations });
         showToast(
           "ok",
           "Policies salvas",
@@ -608,8 +740,8 @@
         });
         if (snap.ok) {
           const snapshot = await snap.json();
-          // force policy draft sync from saved server state
           state.policyDraft = null;
+          state.installationDraft = null;
           applySnapshot(snapshot);
         }
       } catch (error) {
@@ -707,14 +839,16 @@
     renderJobs(snapshot.jobs || []);
     renderDeliveries(snapshot.deliveries || []);
     renderLogs(snapshot.logs || []);
-    // Do not clobber in-progress policy edits on every SSE tick.
+    // Do not clobber in-progress policy/installation edits on every SSE tick.
     if (!state.actionInFlight) {
-      if (!state.policyDraft) {
+      if (!state.policyDraft && !state.installationDraft) {
         syncPolicyDraftFromServer(snapshot.policies || {});
       } else {
-        // Keep meta/options fresh, preserve draft.
-        state.policyMeta.installations = snapshot.policies?.installations || state.policyMeta.installations;
-        state.policyMeta.broker_note = snapshot.policies?.broker_note || state.policyMeta.broker_note;
+        // Keep meta/options fresh, preserve drafts.
+        state.policyMeta.installations =
+          snapshot.policies?.installations || state.policyMeta.installations;
+        state.policyMeta.broker_note =
+          snapshot.policies?.broker_note || state.policyMeta.broker_note;
         $("policy-note").textContent = state.policyMeta.broker_note || "";
       }
     }

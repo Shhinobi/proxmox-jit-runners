@@ -135,11 +135,16 @@
     </section>
     <section id="panel-policies" class="panel">
       <div class="policy-toolbar">
+        <button type="button" id="btn-install-add" class="btn">Add installation</button>
         <button type="button" id="btn-policy-add" class="btn ok">Add repository</button>
         <button type="button" id="btn-policy-save" class="btn">Save policies</button>
         <button type="button" id="btn-policy-reset" class="btn ghost">Reset</button>
       </div>
       <p class="policy-note" id="policy-note"></p>
+      <h2 class="policy-section-title">GitHub installations</h2>
+      <p class="policy-hint muted">Edite o <code>account</code> (handle/org), <code>installation_id</code> e scope. O repositório deve ter owner igual ao account.</p>
+      <div id="install-editor" class="policy-editor"></div>
+      <h2 class="policy-section-title">Repository policies</h2>
       <div id="policy-editor" class="policy-editor"></div>
     </section>
   </main>

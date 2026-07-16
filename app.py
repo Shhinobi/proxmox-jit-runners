@@ -270,8 +270,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         repositories = body.get("repositories") if isinstance(body, dict) else None
         if not isinstance(repositories, dict):
             raise HTTPException(status_code=400, detail="body.repositories must be an object")
+        installations = body.get("installations") if isinstance(body, dict) else None
+        if installations is not None and not isinstance(installations, dict):
+            raise HTTPException(
+                status_code=400, detail="body.installations must be an object when provided"
+            )
         try:
-            result = await apply_repository_policies(orchestrator, repositories)
+            result = await apply_repository_policies(
+                orchestrator, repositories, installations=installations
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
