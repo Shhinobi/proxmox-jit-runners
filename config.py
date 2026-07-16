@@ -144,6 +144,49 @@ def repository_policy_to_dict(policy: RepositoryPolicy) -> dict[str, Any]:
     }
 
 
+def installation_to_dict(installation: GitHubInstallation) -> dict[str, Any]:
+    return {
+        "account": installation.account,
+        "installation_id": int(installation.installation_id),
+        "scope": installation.scope,
+        "runner_group_id": int(installation.runner_group_id),
+    }
+
+
+def parse_github_installations(raw_installations: dict[str, Any]) -> dict[str, GitHubInstallation]:
+    if not isinstance(raw_installations, dict) or not raw_installations:
+        raise ConfigError("at least one GitHub installation is required")
+    installations: dict[str, GitHubInstallation] = {}
+    for name, value in raw_installations.items():
+        key = str(name).strip()
+        if not key:
+            raise ConfigError("installation key must not be empty")
+        if not isinstance(value, dict):
+            raise ConfigError(f"{key}: installation must be a mapping")
+        try:
+            account = str(value["account"]).strip()
+            installation_id = int(value["installation_id"])
+            scope = str(value["scope"]).strip()
+            runner_group_id = int(value.get("runner_group_id", 1))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ConfigError(f"{key}: invalid installation fields: {exc}") from exc
+        if not account:
+            raise ConfigError(f"{key}: account must not be empty")
+        if installation_id <= 0:
+            raise ConfigError(f"{key}: installation_id must be positive")
+        if scope not in {"organization", "repository"}:
+            raise ConfigError(f"{key}: scope must be organization or repository")
+        if runner_group_id <= 0:
+            raise ConfigError(f"{key}: runner_group_id must be positive")
+        installations[key] = GitHubInstallation(
+            account=account,
+            installation_id=installation_id,
+            scope=scope,
+            runner_group_id=runner_group_id,
+        )
+    return installations
+
+
 def parse_repository_policies(
     raw_repositories: dict[str, Any],
     installations: dict[str, GitHubInstallation],
@@ -194,26 +237,27 @@ def parse_repository_policies(
 def save_repository_policies(
     repositories: dict[str, Any],
     path: str | Path | None = None,
+    installations: dict[str, Any] | None = None,
 ) -> Settings:
-    """Persist repository policies to a writable override file and reload settings."""
+    """Persist repository (+ optional installation) policies to override and reload."""
     cfg_path = config_path(path)
     base = _load_yaml(cfg_path)
     if "github" not in base or "installations" not in base["github"]:
         raise ConfigError("configuration is missing github.installations")
-    installations = {
-        name: GitHubInstallation(
-            account=str(value["account"]),
-            installation_id=int(value["installation_id"]),
-            scope=str(value["scope"]),
-            runner_group_id=int(value.get("runner_group_id", 1)),
-        )
-        for name, value in base["github"]["installations"].items()
-    }
-    parsed = parse_repository_policies(repositories, installations)
+    if installations is None:
+        # Keep current effective installations (base + existing override).
+        current = load_settings(cfg_path)
+        parsed_installations = current.github.installations
+    else:
+        parsed_installations = parse_github_installations(installations)
+    parsed = parse_repository_policies(repositories, parsed_installations)
     payload = {
+        "installations": {
+            name: installation_to_dict(inst) for name, inst in parsed_installations.items()
+        },
         "repositories": {
             name: repository_policy_to_dict(policy) for name, policy in parsed.items()
-        }
+        },
     }
     db_path = str(base.get("database_path", "/var/lib/runner-orchestrator/state.db"))
     override = repositories_override_path(db_path)
@@ -238,20 +282,18 @@ def load_settings(path: str | Path | None = None) -> Settings:
     override = repositories_override_path(db_hint)
     if override.is_file():
         override_raw = _load_yaml(override)
-        if isinstance(override_raw, dict) and isinstance(override_raw.get("repositories"), dict):
-            raw["repositories"] = override_raw["repositories"]
+        if isinstance(override_raw, dict):
+            if isinstance(override_raw.get("repositories"), dict):
+                raw["repositories"] = override_raw["repositories"]
+            if isinstance(override_raw.get("installations"), dict):
+                raw.setdefault("github", {})
+                if not isinstance(raw["github"], dict):
+                    raw["github"] = {}
+                raw["github"]["installations"] = override_raw["installations"]
     try:
         gh_raw = raw["github"]
         pve_raw = raw["proxmox"]
-        installations = {
-            name: GitHubInstallation(
-                account=str(value["account"]),
-                installation_id=int(value["installation_id"]),
-                scope=str(value["scope"]),
-                runner_group_id=int(value.get("runner_group_id", 1)),
-            )
-            for name, value in gh_raw["installations"].items()
-        }
+        installations = parse_github_installations(gh_raw["installations"])
         github = GitHubConfig(
             app_id=_secret_override(str(gh_raw.get("app_id", "")), "GITHUB_APP_ID"),
             private_key_file=_secret_override(str(gh_raw["private_key_file"]), "GITHUB_PRIVATE_KEY_FILE"),
