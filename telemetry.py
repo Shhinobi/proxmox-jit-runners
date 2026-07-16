@@ -42,7 +42,7 @@ def configure_telemetry(app: Any) -> None:
     trace.set_tracer_provider(provider)
     FastAPIInstrumentor.instrument_app(
         app,
-        excluded_urls="/health/live,/health/ready,/metrics",
+        excluded_urls="/health/live,/health/ready,/metrics,/ui.*,/api/v1/.*",
     )
     HTTPXClientInstrumentor().instrument()
     LoggingInstrumentor().instrument(set_logging_format=False)

@@ -4,17 +4,20 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from .api import build_overview, public_policies, ui_directory
 from .broker import BrokerClient
 from .config import Settings, load_settings
 from .db import Database
 from .github import GitHubClient
 from .proxmox import ProxmoxClient
 from .security import read_secret, verify_webhook
-from .telemetry import configure_telemetry, set_current_span_attributes
 from .service import Orchestrator
+from .telemetry import configure_telemetry, set_current_span_attributes
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -97,6 +100,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/metrics")
     async def metrics() -> Response:
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    @app.get("/api/v1/overview")
+    async def api_overview() -> dict[str, object]:
+        return await build_overview(orchestrator, cfg)
+
+    @app.get("/api/v1/instances")
+    async def api_instances() -> list[dict[str, object]]:
+        return await orchestrator.db.list_instances()
+
+    @app.get("/api/v1/jobs")
+    async def api_jobs(
+        limit: int = Query(default=50, ge=1, le=200),
+        status_filter: str | None = Query(default=None, alias="status"),
+    ) -> list[dict[str, object]]:
+        return await orchestrator.db.list_jobs(limit=limit, status=status_filter)
+
+    @app.get("/api/v1/deliveries")
+    async def api_deliveries(limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, object]]:
+        return await orchestrator.db.list_deliveries(limit=limit)
+
+    @app.get("/api/v1/policies")
+    async def api_policies() -> dict[str, object]:
+        return public_policies(cfg)
+
+    ui_dir = ui_directory()
+    if ui_dir.is_dir():
+        @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+        async def root_redirect() -> RedirectResponse:
+            # Dedicated dashboard hosts (runners.lan / runners.kyo) land on /.
+            # Public webhook host is path-locked to /webhooks/github in Traefik.
+            return RedirectResponse(url="/ui/", status_code=307)
+
+        @app.api_route("/ui", methods=["GET", "HEAD"], include_in_schema=False)
+        async def ui_redirect() -> RedirectResponse:
+            return RedirectResponse(url="/ui/", status_code=307)
+
+        # Mount last so API routes take precedence. html=True serves index.html at /ui/.
+        app.mount("/ui", StaticFiles(directory=str(ui_dir), html=True), name="ui")
 
     return app
 

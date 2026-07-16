@@ -350,6 +350,51 @@ class Database:
         instances = await self._fetchall("SELECT mode, status, COUNT(*) AS total FROM instances GROUP BY mode, status")
         return {"jobs": jobs, "instances": instances}
 
+    async def list_jobs(self, limit: int = 50, status: str | None = None) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 200))
+        if status:
+            rows = await self._fetchall(
+                """
+                SELECT job_id, delivery_id, run_id, repository, mode, labels_json, status,
+                       runner_name, instance_id, attempts, error, created_at, updated_at, completed_at
+                FROM jobs
+                WHERE status = ?
+                ORDER BY created_at DESC, job_id DESC
+                LIMIT ?
+                """,
+                (status, limit),
+            )
+        else:
+            rows = await self._fetchall(
+                """
+                SELECT job_id, delivery_id, run_id, repository, mode, labels_json, status,
+                       runner_name, instance_id, attempts, error, created_at, updated_at, completed_at
+                FROM jobs
+                ORDER BY created_at DESC, job_id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        for row in rows:
+            raw_labels = row.pop("labels_json", "[]")
+            try:
+                row["labels"] = json.loads(raw_labels) if raw_labels else []
+            except (TypeError, json.JSONDecodeError):
+                row["labels"] = []
+        return rows
+
+    async def list_deliveries(self, limit: int = 50) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 200))
+        return await self._fetchall(
+            """
+            SELECT delivery_id, event, action, accepted, reason, received_at
+            FROM deliveries
+            ORDER BY received_at DESC, delivery_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
     async def _execute(self, sql: str, parameters: tuple[Any, ...] = ()) -> None:
         async with self.connect() as db:
             await db.execute(sql, parameters)

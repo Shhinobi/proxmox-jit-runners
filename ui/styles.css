@@ -1,0 +1,159 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b1220;
+  --panel: #121a2b;
+  --border: #243049;
+  --text: #e7eefc;
+  --muted: #93a4c3;
+  --accent: #5b9dff;
+  --ok: #3dd68c;
+  --warn: #f5c542;
+  --bad: #ff6b7a;
+  --chip: #1a2438;
+  --row: #0f1728;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: var(--sans);
+  background: radial-gradient(1200px 600px at 10% -10%, #17233d 0%, var(--bg) 55%);
+  color: var(--text);
+  min-height: 100vh;
+  padding: 1.25rem 1.5rem 2rem;
+}
+
+.top {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+  margin-bottom: 1.25rem;
+}
+h1 { margin: 0; font-size: 1.45rem; letter-spacing: 0.01em; }
+.sub { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.92rem; }
+
+.badges { display: flex; flex-wrap: wrap; gap: 0.45rem; justify-content: flex-end; }
+.badge {
+  background: var(--chip);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.28rem 0.7rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.badge.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+.badge.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
+.badge.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--border)); }
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+.card {
+  background: linear-gradient(180deg, #152038 0%, var(--panel) 100%);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.9rem 1rem;
+}
+.card .label { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.card .value { margin-top: 0.35rem; font-size: 1.45rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.tabs {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+.tab {
+  background: var(--panel);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.45rem 0.9rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.88rem;
+}
+.tab.active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+}
+
+.panel { display: none; }
+.panel.active { display: block; }
+
+.table-wrap {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+th, td {
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+th {
+  position: sticky;
+  top: 0;
+  background: #17233a;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.mono { font-family: var(--mono); font-size: 0.8rem; }
+.muted { color: var(--muted); }
+.status {
+  display: inline-block;
+  padding: 0.12rem 0.45rem;
+  border-radius: 6px;
+  background: var(--chip);
+  border: 1px solid var(--border);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.status.running, .status.ready, .status.accepted, .status.completed { color: var(--ok); }
+.status.queued, .status.provisioning, .status.reserved, .status.waiting_for_runner { color: var(--warn); }
+.status.failed, .status.rejected, .status.delete_failed, .status.error { color: var(--bad); }
+.row-bad { background: color-mix(in srgb, var(--bad) 8%, transparent); }
+.empty {
+  padding: 1.5rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+footer {
+  margin-top: 1rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  flex-wrap: wrap;
+}
+footer code {
+  font-family: var(--mono);
+  color: var(--accent);
+}
+
+@media (max-width: 720px) {
+  body { padding: 1rem; }
+  .top { flex-direction: column; }
+  .badges { justify-content: flex-start; }
+}
