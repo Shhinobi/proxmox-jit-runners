@@ -191,24 +191,59 @@ def build_alerts(
             }
         )
     warm_ready = int(capacity.get("warm_ready") or 0)
-    if warm_ready < 1 and not overview.get("shadow_mode"):
+    warm_target = int(capacity.get("warm_target") or 0)
+    warm_provisioning = int(capacity.get("warm_provisioning") or 0)
+    if (
+        warm_target > 0
+        and warm_ready < 1
+        and warm_provisioning == 0
+        and not overview.get("shadow_mode")
+    ):
         alerts.append(
             {
                 "severity": "warning",
                 "code": "warm_missing",
-                "message": "No warm runner is ready.",
+                "message": (
+                    f"No warm runner is ready (target {warm_target}). "
+                    "Check Logs for provision/destroy failures."
+                ),
+            }
+        )
+    elif (
+        warm_target > 0
+        and warm_ready < warm_target
+        and warm_provisioning > 0
+        and not overview.get("shadow_mode")
+    ):
+        alerts.append(
+            {
+                "severity": "info",
+                "code": "warm_replenishing",
+                "message": (
+                    f"Warm pool replenishing: {warm_ready}/{warm_target} ready, "
+                    f"{warm_provisioning} provisioning."
+                ),
             }
         )
     delete_failed = [
         inst for inst in instances if str(inst.get("status")) == "delete_failed"
     ]
     if delete_failed:
-        vmids = ", ".join(str(inst.get("vmid")) for inst in delete_failed)
+        parts = []
+        for inst in delete_failed:
+            err = str(inst.get("error") or "").strip()
+            if err:
+                parts.append(f"{inst.get('vmid')} ({err[:120]})")
+            else:
+                parts.append(str(inst.get("vmid")))
         alerts.append(
             {
                 "severity": "warning",
                 "code": "delete_failed",
-                "message": f"{len(delete_failed)} instance(s) in delete_failed: {vmids}",
+                "message": (
+                    f"{len(delete_failed)} instance(s) in delete_failed: "
+                    f"{'; '.join(parts)}. See Logs tab."
+                ),
             }
         )
     cleanup = metrics.get("cleanup_failures_total") or {}
@@ -230,12 +265,16 @@ async def build_overview(orchestrator: Orchestrator, settings: Settings) -> dict
     pool_ready = await orchestrator.db.count_ready_pool()
     oldest_queued = await orchestrator.db.oldest_queued_job_age()
     warm_ready = 0
+    warm_provisioning = 0
     delete_failed = 0
     for row in summary["instances"]:
         if row["mode"] == "warm" and row["status"] == "ready":
             warm_ready += int(row["total"])
+        if row["mode"] == "warm" and row["status"] == "provisioning":
+            warm_provisioning += int(row["total"])
         if row["status"] == "delete_failed":
             delete_failed += int(row["total"])
+    warm_target = sum(int(policy.warm_capacity) for policy in settings.repositories.values())
     queued = next((int(row["total"]) for row in summary["jobs"] if row["status"] == "queued"), 0)
     overview = {
         "generated_at": int(time.time()),
@@ -250,6 +289,8 @@ async def build_overview(orchestrator: Orchestrator, settings: Settings) -> dict
             "queued": queued,
             "pool_ready": pool_ready,
             "warm_ready": warm_ready,
+            "warm_target": warm_target,
+            "warm_provisioning": warm_provisioning,
             "delete_failed": delete_failed,
             "oldest_queued_job_age_seconds": oldest_queued,
         },
@@ -283,6 +324,7 @@ async def build_dashboard_snapshot(
     metrics = metrics_summary()
     durations = await orchestrator.db.recent_job_durations(limit=30)
     alerts = build_alerts(overview, all_instances, metrics)
+    logs = orchestrator.events.list(limit=150)
     return {
         "overview": overview,
         "alerts": alerts,
@@ -292,6 +334,7 @@ async def build_dashboard_snapshot(
         "policies": public_policies(settings),
         "metrics": metrics,
         "job_durations": durations,
+        "logs": logs,
     }
 
 

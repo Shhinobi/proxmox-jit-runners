@@ -86,6 +86,7 @@
     <button type="button" class="tab active" data-tab="instances">Instances</button>
     <button type="button" class="tab" data-tab="jobs">Jobs</button>
     <button type="button" class="tab" data-tab="deliveries">Webhooks</button>
+    <button type="button" class="tab" data-tab="logs">Logs</button>
     <button type="button" class="tab" data-tab="policies">Policies</button>
   </nav>
 
@@ -98,6 +99,39 @@
     </section>
     <section id="panel-deliveries" class="panel">
       <div class="table-wrap"><table id="table-deliveries"></table></div>
+    </section>
+    <section id="panel-logs" class="panel">
+      <div class="logs-toolbar">
+        <label>Level
+          <select id="log-filter-level">
+            <option value="">all</option>
+            <option value="error">error</option>
+            <option value="warn">warn+</option>
+            <option value="info">info</option>
+          </select>
+        </label>
+        <label>Category
+          <select id="log-filter-category">
+            <option value="">all</option>
+            <option value="warm">warm</option>
+            <option value="job">job</option>
+            <option value="destroy">destroy</option>
+            <option value="reconcile">reconcile</option>
+            <option value="system">system</option>
+            <option value="admin">admin</option>
+          </select>
+        </label>
+        <label class="inline-check">
+          <input type="checkbox" id="log-auto-scroll" checked />
+          Follow
+        </label>
+        <button type="button" id="btn-log-clear-filters" class="btn ghost">Clear filters</button>
+        <span class="logs-meta muted" id="logs-meta"></span>
+      </div>
+      <div class="logs-wrap" id="logs-wrap">
+        <div class="logs-empty muted" id="logs-empty">Aguardando eventos do orchestrator…</div>
+        <div id="logs-list" class="logs-list"></div>
+      </div>
     </section>
     <section id="panel-policies" class="panel">
       <div class="policy-toolbar">

@@ -2,10 +2,12 @@
   const state = {
     source: null,
     filters: { repository: "", status: "", mode: "" },
+    logFilters: { level: "", category: "" },
     lastSnapshot: null,
     toastTimer: null,
     actionInFlight: false,
     confirmResolver: null,
+    openLogIds: new Set(),
     policyDraft: null,
     policyMeta: {
       mode_options: ["ephemeral", "pool", "persistent"],
@@ -178,7 +180,12 @@
     $("cards").innerHTML = [
       card("Queue", caps.queued ?? 0),
       card("Active", `${caps.active ?? 0}/${caps.max_active ?? "?"}`),
-      card("Warm ready", caps.warm_ready ?? 0),
+      card(
+        "Warm ready",
+        caps.warm_target != null
+          ? `${caps.warm_ready ?? 0}/${caps.warm_target}`
+          : (caps.warm_ready ?? 0)
+      ),
       card("Pool ready", `${caps.pool_ready ?? 0}/${caps.pool_size ?? "?"}`),
       card("Delete failed", caps.delete_failed ?? 0),
       card("Oldest queued", fmtAge(caps.oldest_queued_job_age_seconds)),
@@ -205,7 +212,8 @@
     const rows = (items || [])
       .map((item) => {
         const bad = ["delete_failed", "failed"].includes(String(item.status));
-        return `<tr class="${bad ? "row-bad" : ""}">
+        const err = item.error ? String(item.error) : "";
+        return `<tr class="${bad ? "row-bad" : ""}" title="${escapeHtml(err)}">
         <td class="mono">${escapeHtml(item.vmid)}</td>
         <td class="mono">${escapeHtml(item.ip_address)}</td>
         <td>${escapeHtml(item.mode)}</td>
@@ -213,15 +221,92 @@
         <td class="mono">${escapeHtml(item.repository || "—")}</td>
         <td class="mono">${escapeHtml(item.runner_name || "—")}</td>
         <td class="mono">${link(item.github_job_url || item.github_run_url, item.job_id)}</td>
+        <td class="mono" title="${escapeHtml(err)}">${escapeHtml(err ? err.slice(0, 80) : "—")}</td>
         <td class="muted">${escapeHtml(fmtTs(item.updated_at))}</td>
       </tr>`;
       })
       .join("");
     renderTable(
       $("table-instances"),
-      ["VMID", "IP", "Mode", "Status", "Repository", "Runner", "Job", "Updated"],
+      ["VMID", "IP", "Mode", "Status", "Repository", "Runner", "Job", "Error", "Updated"],
       rows
     );
+  }
+
+  function formatContext(ctx) {
+    if (!ctx || typeof ctx !== "object") return "";
+    return Object.entries(ctx)
+      .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`)
+      .join(" · ");
+  }
+
+  function renderLogs(items) {
+    let rows = items || [];
+    if (state.logFilters.level === "error") {
+      rows = rows.filter((e) => e.level === "error");
+    } else if (state.logFilters.level === "warn") {
+      rows = rows.filter((e) => e.level === "warn" || e.level === "error");
+    } else if (state.logFilters.level === "info") {
+      rows = rows.filter((e) => e.level === "info");
+    }
+    if (state.logFilters.category) {
+      rows = rows.filter(
+        (e) => String(e.category || "").toLowerCase() === state.logFilters.category
+      );
+    }
+    const list = $("logs-list");
+    const empty = $("logs-empty");
+    $("logs-meta").textContent = rows.length
+      ? `${rows.length} event(s) · ring buffer (process memory)`
+      : "no matching events";
+    if (!rows.length) {
+      list.innerHTML = "";
+      empty.style.display = "block";
+      return;
+    }
+    empty.style.display = "none";
+    list.innerHTML = rows
+      .map((event) => {
+        const level = String(event.level || "info");
+        const open = state.openLogIds.has(event.id) ? "open" : "";
+        const hasDetail = Boolean(event.detail);
+        const ctx = formatContext(event.context);
+        const rowClass = [
+          "log-row",
+          level === "error" ? "error-row" : "",
+          level === "warn" ? "warn-row" : "",
+          hasDetail ? "has-detail" : "",
+          open,
+        ]
+          .filter(Boolean)
+          .join(" ");
+        return `<div class="${rowClass}" data-log-id="${escapeHtml(event.id)}">
+          <div class="ts">${escapeHtml(fmtTs(event.ts))}</div>
+          <div class="lvl ${escapeHtml(level)}">${escapeHtml(level)}</div>
+          <div class="cat">${escapeHtml(event.category || "—")}</div>
+          <div class="msg">${escapeHtml(event.message || "")}${
+            ctx ? `<div class="ctx">${escapeHtml(ctx)}</div>` : ""
+          }</div>
+          ${
+            hasDetail
+              ? `<pre class="detail">${escapeHtml(event.detail)}</pre>`
+              : ""
+          }
+        </div>`;
+      })
+      .join("");
+    list.querySelectorAll(".log-row.has-detail").forEach((row) => {
+      row.addEventListener("click", () => {
+        const id = Number(row.getAttribute("data-log-id"));
+        if (state.openLogIds.has(id)) state.openLogIds.delete(id);
+        else state.openLogIds.add(id);
+        row.classList.toggle("open");
+      });
+    });
+    if ($("log-auto-scroll")?.checked) {
+      // Newest is at top; keep viewport at top when following.
+      $("logs-wrap").scrollTop = 0;
+    }
   }
 
   function renderJobs(items) {
@@ -568,7 +653,12 @@
       $("cards").innerHTML = [
         card("Queue", caps.queued ?? 0),
         card("Active", `${caps.active ?? 0}/${caps.max_active ?? "?"}`),
-        card("Warm ready", caps.warm_ready ?? 0),
+        card(
+          "Warm ready",
+          caps.warm_target != null
+            ? `${caps.warm_ready ?? 0}/${caps.warm_target}`
+            : (caps.warm_ready ?? 0)
+        ),
         card("Pool ready", `${caps.pool_ready ?? 0}/${caps.pool_size ?? "?"}`),
         card("Delete failed", caps.delete_failed ?? 0),
         card("Oldest queued", fmtAge(caps.oldest_queued_job_age_seconds)),
@@ -578,6 +668,7 @@
     renderInstances(snapshot.instances || []);
     renderJobs(snapshot.jobs || []);
     renderDeliveries(snapshot.deliveries || []);
+    renderLogs(snapshot.logs || []);
     // Do not clobber in-progress policy edits on every SSE tick.
     if (!state.actionInFlight) {
       if (!state.policyDraft) {
@@ -729,6 +820,21 @@
     });
   }
 
+  function setupLogFilters() {
+    const applyLocal = () => {
+      state.logFilters.level = $("log-filter-level").value;
+      state.logFilters.category = $("log-filter-category").value;
+      if (state.lastSnapshot) renderLogs(state.lastSnapshot.logs || []);
+    };
+    $("log-filter-level").addEventListener("change", applyLocal);
+    $("log-filter-category").addEventListener("change", applyLocal);
+    $("btn-log-clear-filters").addEventListener("click", () => {
+      $("log-filter-level").value = "";
+      $("log-filter-category").value = "";
+      applyLocal();
+    });
+  }
+
   function setupAdmin() {
     $("btn-drain").addEventListener("click", async () => {
       const ok = await confirmAction({
@@ -775,6 +881,7 @@
   setupConfirmModal();
   setupTabs();
   setupFilters();
+  setupLogFilters();
   setupAdmin();
   setupPolicyEditor();
   connectSSE();

@@ -160,6 +160,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> list[dict[str, object]]:
         return await orchestrator.db.recent_job_durations(limit=limit)
 
+    @app.get("/api/v1/logs")
+    async def api_logs(
+        limit: int = Query(default=150, ge=1, le=500),
+        level: str | None = Query(default=None),
+        category: str | None = Query(default=None),
+        min_id: int | None = Query(default=None),
+    ) -> list[dict[str, object]]:
+        return orchestrator.events.list(
+            limit=limit, level=level, category=category, min_id=min_id
+        )
+
     @app.get("/api/v1/snapshot")
     async def api_snapshot(
         limit: int = Query(default=50, ge=1, le=200),

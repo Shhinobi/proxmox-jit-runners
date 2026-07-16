@@ -11,6 +11,7 @@ from prometheus_client import Counter, Gauge, Histogram
 from .broker import BrokerClient
 from .config import GitHubInstallation, RepositoryPolicy, Settings
 from .db import Database
+from .eventlog import EventLog
 from .github import GitHubClient
 from .policy import Decision, cache_slug, decide, repository_policy
 from .proxmox import ProxmoxClient
@@ -55,6 +56,7 @@ class Orchestrator:
         self.github = github
         self.proxmox = proxmox
         self.broker = broker
+        self.events = EventLog(maxlen=500)
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -62,8 +64,31 @@ class Orchestrator:
         self._pool_lock = asyncio.Lock()
         self._allocation_lock = asyncio.Lock()
 
+    def log(
+        self,
+        level: str,
+        category: str,
+        message: str,
+        *,
+        detail: str | None = None,
+        **context: Any,
+    ) -> None:
+        event = self.events.emit(
+            level, category, message, detail=detail, **context
+        )
+        log_line = f"[{category}] {message}"
+        if detail:
+            log_line = f"{log_line} | {detail[:300]}"
+        if level == "error":
+            LOGGER.error(log_line, extra=event.get("context") or {})
+        elif level == "warn":
+            LOGGER.warning(log_line, extra=event.get("context") or {})
+        else:
+            LOGGER.info(log_line, extra=event.get("context") or {})
+
     async def start(self) -> None:
         await self.db.initialize()
+        self.log("info", "system", "orchestrator started")
         self._tasks = [
             asyncio.create_task(self._worker_loop(), name="runner-worker"),
             asyncio.create_task(self._reconcile_loop(), name="runner-reconciler"),
@@ -220,6 +245,15 @@ class Orchestrator:
             ):
                 instance = await self.db.claim_ready_warm(decision.repository, job_id)
                 if instance:
+                    self.log(
+                        "info",
+                        "warm",
+                        f"claimed warm runner {instance.get('runner_name')}",
+                        job_id=job_id,
+                        vmid=instance.get("vmid"),
+                        repository=decision.repository,
+                        runner_name=instance.get("runner_name"),
+                    )
                     await self.db.set_job_status(
                         job_id,
                         "waiting_for_runner",
@@ -229,15 +263,39 @@ class Orchestrator:
                     )
                     self._schedule_warm_replenishment()
                     return
+                self.log(
+                    "info",
+                    "warm",
+                    "no warm ready; falling back to provision",
+                    job_id=job_id,
+                    repository=decision.repository,
+                    mode=mode,
+                )
 
             if await self.db.count_active() >= self.settings.capacity.max_active:
                 await self.db.set_job_status(job_id, "queued", error="capacity_exhausted")
+                self.log(
+                    "warn",
+                    "job",
+                    "capacity exhausted; requeue",
+                    job_id=job_id,
+                    repository=decision.repository,
+                    mode=mode,
+                )
                 await asyncio.sleep(5)
                 return
 
             await self._provision(job, decision)
         except Exception as exc:
             PROVISION_FAILURES.labels(mode).inc()
+            self.events.exception(
+                "job",
+                f"job provisioning failed job_id={job_id}",
+                exc,
+                job_id=job_id,
+                mode=mode,
+                repository=job.get("repository"),
+            )
             LOGGER.exception("job provisioning failed", extra={"job_id": job_id, "mode": mode})
             instance = await self.db.find_instance_by_job(job_id)
             if instance:
@@ -425,6 +483,7 @@ class Orchestrator:
             await self._destroy_instance_inner(instance)
 
     async def _destroy_instance_inner(self, instance: dict[str, Any]) -> None:
+        vmid = int(instance["vmid"])
         try:
             if (
                 instance["status"] in {"delete_pending", "delete_failed"}
@@ -438,18 +497,25 @@ class Orchestrator:
                     str(instance["runner_name"]),
                 )
                 if runner and runner.get("busy", False):
-                    LOGGER.warning(
-                        "instance cleanup deferred because GitHub runner is busy",
-                        extra={"vmid": instance["vmid"]},
+                    self.log(
+                        "warn",
+                        "destroy",
+                        f"cleanup deferred; GitHub runner still busy",
+                        vmid=vmid,
+                        runner_name=instance.get("runner_name"),
+                        repository=instance.get("repository"),
                     )
                     return
             transitioned = await self.db.transition_instance(
-                instance["id"], {str(instance["status"])}, "deleting"
+                instance["id"], {str(instance["status"])}, "deleting", error=None
             )
             if not transitioned:
-                LOGGER.info(
-                    "instance cleanup skipped after concurrent state change",
-                    extra={"vmid": instance["vmid"]},
+                self.log(
+                    "info",
+                    "destroy",
+                    "cleanup skipped after concurrent state change",
+                    vmid=vmid,
+                    status=instance.get("status"),
                 )
                 return
             if instance["mode"] == "warm" and instance.get("repository") and instance.get("runner_name"):
@@ -461,14 +527,42 @@ class Orchestrator:
                     await self.github.delete_runner(
                         installation, str(instance["repository"]), int(runner["id"])
                     )
-            await self.proxmox.destroy(int(instance["vmid"]))
+                    self.log(
+                        "info",
+                        "destroy",
+                        f"deleted GitHub runner {instance.get('runner_name')}",
+                        vmid=vmid,
+                        runner_id=runner.get("id"),
+                        repository=instance.get("repository"),
+                    )
+            await self.proxmox.destroy(vmid)
             await self.db.delete_instance(instance["id"])
-        except Exception:
+            self.log(
+                "info",
+                "destroy",
+                f"destroyed instance vmid={vmid}",
+                vmid=vmid,
+                mode=instance.get("mode"),
+                repository=instance.get("repository"),
+            )
+        except Exception as exc:
             CLEANUP_FAILURES.labels(str(instance["mode"])).inc()
             await self.db.transition_instance(
-                instance["id"], {"deleting"}, "delete_failed"
+                instance["id"],
+                {"deleting"},
+                "delete_failed",
+                error=str(exc)[:500],
             )
-            LOGGER.exception("instance cleanup failed", extra={"vmid": instance["vmid"]})
+            self.events.exception(
+                "destroy",
+                f"instance cleanup failed vmid={vmid}",
+                exc,
+                vmid=vmid,
+                mode=instance.get("mode"),
+                runner_name=instance.get("runner_name"),
+                repository=instance.get("repository"),
+            )
+            LOGGER.exception("instance cleanup failed", extra={"vmid": vmid})
 
     async def _reconcile_loop(self) -> None:
         while not self._stop.is_set():
@@ -476,7 +570,8 @@ class Orchestrator:
                 await self.reconcile()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                self.events.exception("reconcile", "reconciliation failed", exc)
                 LOGGER.exception("reconciliation failed")
             try:
                 await asyncio.wait_for(
@@ -574,11 +669,25 @@ class Orchestrator:
             "warm", repository, None, None, enforce_capacity=True
         )
         if reservation is None:
+            self.log(
+                "warn",
+                "warm",
+                "warm reserve failed (capacity or IP range)",
+                repository=repository,
+            )
             return False
         instance_id, vmid, ip_address = reservation
         runner_name = f"pve-lxc-warm-{vmid}"
+        self.log(
+            "info",
+            "warm",
+            f"provisioning warm runner {runner_name}",
+            vmid=vmid,
+            repository=repository,
+            ip_address=ip_address,
+        )
         await self.db.update_instance(
-            instance_id, "provisioning", runner_name=runner_name
+            instance_id, "provisioning", runner_name=runner_name, error=None
         )
         try:
             profile = self.settings.profiles["crossbuild-small"]
@@ -588,6 +697,27 @@ class Orchestrator:
             await self.broker.attach_cache(vmid, cache_slug(repository))
             installation = self._installation(repository)
             labels = self._warm_labels(policy)
+            # Stale GitHub runner registrations (e.g. after failed destroy) cause
+            # generate-jitconfig 409 Already exists. Remove offline/idle leftovers.
+            stale = await self.github.find_runner(
+                installation, repository, runner_name
+            )
+            if stale:
+                if stale.get("busy", False):
+                    raise RuntimeError(
+                        f"GitHub runner {runner_name} still busy; cannot recreate"
+                    )
+                await self.github.delete_runner(
+                    installation, repository, int(stale["id"])
+                )
+                self.log(
+                    "warn",
+                    "warm",
+                    f"removed stale GitHub runner {runner_name} before JIT",
+                    vmid=vmid,
+                    runner_id=stale.get("id"),
+                    repository=repository,
+                )
             jit = await self.github.generate_jit(
                 installation, repository, runner_name, labels
             )
@@ -618,6 +748,7 @@ class Orchestrator:
                 {"provisioning"},
                 target_status,
                 last_used_at=int(time.time()),
+                error=None,
             )
             if not transitioned:
                 current = await self.db.get_instance(instance_id)
@@ -632,19 +763,43 @@ class Orchestrator:
                     )
             WARM_REGISTRATION.labels(outcome).inc()
             PROVISION.labels("warm").observe(time.monotonic() - started)
+            self.log(
+                "info",
+                "warm",
+                f"warm runner {runner_name} is {target_status}",
+                vmid=vmid,
+                repository=repository,
+                outcome=outcome,
+                duration_seconds=round(time.monotonic() - started, 1),
+            )
             return True
-        except Exception:
+        except Exception as exc:
             PROVISION_FAILURES.labels("warm").inc()
             failed = await self.db.transition_instance(
-                instance_id, {"provisioning"}, "delete_failed"
+                instance_id,
+                {"provisioning"},
+                "delete_failed",
+                error=str(exc)[:500],
             )
             if failed:
                 WARM_REGISTRATION.labels("failed").inc()
+                self.events.exception(
+                    "warm",
+                    f"warm provisioning failed vmid={vmid}",
+                    exc,
+                    vmid=vmid,
+                    repository=repository,
+                    runner_name=runner_name,
+                )
                 raise
             current = await self.db.get_instance(instance_id)
-            LOGGER.warning(
+            self.log(
+                "warn",
+                "warm",
                 "warm provisioning error ignored after runner was claimed",
-                extra={"vmid": vmid, "status": current and current.get("status")},
+                vmid=vmid,
+                status=current and current.get("status"),
+                error=str(exc)[:300],
             )
             return True
 
