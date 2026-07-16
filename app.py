@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .api import (
+    apply_repository_policies,
     build_dashboard_snapshot,
     build_overview,
     metrics_summary,
@@ -249,8 +250,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.put("/api/v1/admin/policies")
+    async def admin_save_policies(request: Request) -> dict[str, object]:
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        repositories = body.get("repositories") if isinstance(body, dict) else None
+        if not isinstance(repositories, dict):
+            raise HTTPException(status_code=400, detail="body.repositories must be an object")
+        try:
+            result = apply_repository_policies(orchestrator, repositories)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # Keep FastAPI app.state aligned for any code reading it.
+        app.state.settings = orchestrator.settings
+        return result
+
     ui_dir = ui_directory()
-    asset_version = "20260716-2"
+    asset_version = "20260716-3"
     if ui_dir.is_dir():
         @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
         async def root_redirect() -> RedirectResponse:

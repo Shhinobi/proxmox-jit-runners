@@ -119,9 +119,127 @@ def _secret_override(value: str, env_name: str) -> str:
     return os.environ.get(env_name, value)
 
 
+def config_path(path: str | Path | None = None) -> Path:
+    return Path(path or os.environ.get("RUNNER_ORCHESTRATOR_CONFIG", "/etc/runner-orchestrator/config.yaml"))
+
+
+def repositories_override_path(settings_database_path: str | None = None) -> Path:
+    """Writable runtime override for repository policies (service user owns this tree)."""
+    explicit = os.environ.get("RUNNER_ORCHESTRATOR_REPOSITORIES_FILE")
+    if explicit:
+        return Path(explicit)
+    if settings_database_path:
+        return Path(settings_database_path).resolve().parent / "repositories-override.yaml"
+    return Path("/var/lib/runner-orchestrator/repositories-override.yaml")
+
+
+def repository_policy_to_dict(policy: RepositoryPolicy) -> dict[str, Any]:
+    return {
+        "github_installation": policy.github_installation,
+        "default_mode": policy.default_mode,
+        "warm_capacity": int(policy.warm_capacity),
+        "allowed_modes": list(policy.allowed_modes),
+        "allowed_events": list(policy.allowed_events),
+        "required_labels": list(policy.required_labels),
+    }
+
+
+def parse_repository_policies(
+    raw_repositories: dict[str, Any],
+    installations: dict[str, GitHubInstallation],
+) -> dict[str, RepositoryPolicy]:
+    if not isinstance(raw_repositories, dict) or not raw_repositories:
+        raise ConfigError("at least one repository policy is required")
+    repositories = {
+        str(name): RepositoryPolicy(
+            github_installation=str(value["github_installation"]),
+            default_mode=str(value.get("default_mode", "ephemeral")),
+            warm_capacity=int(value.get("warm_capacity", 0)),
+            allowed_modes=tuple(value.get("allowed_modes", ["ephemeral", "pool", "persistent"])),
+            allowed_events=tuple(
+                value.get("allowed_events", ["push", "workflow_dispatch", "schedule"])
+            ),
+            required_labels=tuple(
+                value.get("required_labels", ["self-hosted", "proxmox-lxc", "crossbuild"])
+            ),
+        )
+        for name, value in raw_repositories.items()
+    }
+    for repo, policy in repositories.items():
+        if "/" not in repo or repo.count("/") != 1:
+            raise ConfigError(f"{repo}: repository must be OWNER/NAME")
+        owner, name = repo.split("/", 1)
+        if not owner or not name:
+            raise ConfigError(f"{repo}: repository must be OWNER/NAME")
+        installation = installations.get(policy.github_installation)
+        if installation is None:
+            raise ConfigError(f"{repo}: unknown github_installation {policy.github_installation!r}")
+        if installation.scope not in {"organization", "repository"}:
+            raise ConfigError(f"{repo}: GitHub installation scope must be organization or repository")
+        if owner.lower() != installation.account.lower():
+            raise ConfigError(f"{repo}: repository owner does not match GitHub installation account")
+        if policy.default_mode not in policy.allowed_modes:
+            raise ConfigError(f"{repo}: default_mode must be allowed")
+        if policy.warm_capacity < 0:
+            raise ConfigError(f"{repo}: warm_capacity must be non-negative")
+        if not policy.allowed_modes:
+            raise ConfigError(f"{repo}: allowed_modes must not be empty")
+        if not policy.allowed_events:
+            raise ConfigError(f"{repo}: allowed_events must not be empty")
+        if not policy.required_labels:
+            raise ConfigError(f"{repo}: required_labels must not be empty")
+    return repositories
+
+
+def save_repository_policies(
+    repositories: dict[str, Any],
+    path: str | Path | None = None,
+) -> Settings:
+    """Persist repository policies to a writable override file and reload settings."""
+    cfg_path = config_path(path)
+    base = _load_yaml(cfg_path)
+    if "github" not in base or "installations" not in base["github"]:
+        raise ConfigError("configuration is missing github.installations")
+    installations = {
+        name: GitHubInstallation(
+            account=str(value["account"]),
+            installation_id=int(value["installation_id"]),
+            scope=str(value["scope"]),
+            runner_group_id=int(value.get("runner_group_id", 1)),
+        )
+        for name, value in base["github"]["installations"].items()
+    }
+    parsed = parse_repository_policies(repositories, installations)
+    payload = {
+        "repositories": {
+            name: repository_policy_to_dict(policy) for name, policy in parsed.items()
+        }
+    }
+    db_path = str(base.get("database_path", "/var/lib/runner-orchestrator/state.db"))
+    override = repositories_override_path(db_path)
+    override.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = override.with_name(override.name + ".tmp")
+    serialized = yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)
+    try:
+        tmp_path.write_text(serialized, encoding="utf-8")
+        os.replace(tmp_path, override)
+    except OSError as exc:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise ConfigError(f"failed to write repository override: {exc}") from exc
+    return load_settings(cfg_path)
+
+
 def load_settings(path: str | Path | None = None) -> Settings:
-    config_path = Path(path or os.environ.get("RUNNER_ORCHESTRATOR_CONFIG", "/etc/runner-orchestrator/config.yaml"))
-    raw = _load_yaml(config_path)
+    config_path_value = config_path(path)
+    raw = _load_yaml(config_path_value)
+    # Runtime dashboard edits land in a writable override next to the SQLite DB.
+    db_hint = str(raw.get("database_path", "/var/lib/runner-orchestrator/state.db"))
+    override = repositories_override_path(db_hint)
+    if override.is_file():
+        override_raw = _load_yaml(override)
+        if isinstance(override_raw, dict) and isinstance(override_raw.get("repositories"), dict):
+            raw["repositories"] = override_raw["repositories"]
     try:
         gh_raw = raw["github"]
         pve_raw = raw["proxmox"]
@@ -173,37 +291,12 @@ def load_settings(path: str | Path | None = None) -> Settings:
     )
     cache = CacheConfig(**raw.get("cache", {}))
     capacity = CapacityConfig(**raw.get("capacity", {}))
-    repositories = {
-        name: RepositoryPolicy(
-            github_installation=str(value["github_installation"]),
-            default_mode=str(value.get("default_mode", "ephemeral")),
-            warm_capacity=int(value.get("warm_capacity", 0)),
-            allowed_modes=tuple(value.get("allowed_modes", ["ephemeral", "pool", "persistent"])),
-            allowed_events=tuple(value.get("allowed_events", ["push", "workflow_dispatch", "schedule"])),
-            required_labels=tuple(value.get("required_labels", ["self-hosted", "proxmox-lxc", "crossbuild"])),
-        )
-        for name, value in raw.get("repositories", {}).items()
-    }
-    profiles = {name: RunnerProfile(**value) for name, value in raw.get("profiles", {"crossbuild-small": {}}).items()}
-
-    if not repositories:
-        raise ConfigError("at least one repository policy is required")
     if not github.installations:
         raise ConfigError("at least one GitHub installation is required")
+    repositories = parse_repository_policies(raw.get("repositories", {}), github.installations)
+    profiles = {name: RunnerProfile(**value) for name, value in raw.get("profiles", {"crossbuild-small": {}}).items()}
     if proxmox.vmid_start > proxmox.vmid_end or proxmox.ip_start > proxmox.ip_end:
         raise ConfigError("invalid Proxmox VMID or IP range")
-    for repo, policy in repositories.items():
-        installation = github.installations.get(policy.github_installation)
-        if installation is None:
-            raise ConfigError(f"{repo}: unknown github_installation {policy.github_installation!r}")
-        if installation.scope not in {"organization", "repository"}:
-            raise ConfigError(f"{repo}: GitHub installation scope must be organization or repository")
-        if repo.split("/", 1)[0].lower() != installation.account.lower():
-            raise ConfigError(f"{repo}: repository owner does not match GitHub installation account")
-        if policy.default_mode not in policy.allowed_modes:
-            raise ConfigError(f"{repo}: default_mode must be allowed")
-        if policy.warm_capacity < 0:
-            raise ConfigError(f"{repo}: warm_capacity must be non-negative")
     return Settings(
         github=github,
         proxmox=proxmox,
