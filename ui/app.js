@@ -24,10 +24,12 @@
   const $ = (id) => document.getElementById(id);
 
   function closeConfirm(result) {
+    // Always resolve the pending promise — even if the modal is already hidden.
     const modal = $("confirm-modal");
-    if (!modal || modal.classList.contains("hidden")) return;
-    modal.classList.add("hidden");
-    modal.classList.remove("kind-warn", "kind-bad", "kind-ok", "kind-info");
+    if (modal) {
+      modal.classList.add("hidden");
+      modal.classList.remove("kind-warn", "kind-bad", "kind-ok", "kind-info");
+    }
     document.body.classList.remove("modal-open");
     document.removeEventListener("keydown", onConfirmKeydown);
     const resolve = state.confirmResolver;
@@ -41,7 +43,9 @@
       closeConfirm(false);
     } else if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
       const active = document.activeElement;
-      if (active && active.id === "confirm-cancel") return;
+      if (active && (active.id === "confirm-cancel" || active.tagName === "TEXTAREA")) return;
+      // Ignore Enter that still targets the control which opened the dialog.
+      if (active && active.id && active.id.startsWith("btn-")) return;
       event.preventDefault();
       closeConfirm(true);
     }
@@ -58,10 +62,17 @@
   } = {}) {
     return new Promise((resolve) => {
       if (state.confirmResolver) {
-        state.confirmResolver(false);
+        const prev = state.confirmResolver;
         state.confirmResolver = null;
+        prev(false);
       }
       const modal = $("confirm-modal");
+      if (!modal || !$("confirm-ok") || !$("confirm-cancel")) {
+        // Fallback if modal markup is missing (stale HTML cache).
+        const ok = window.confirm(`${title}\n\n${body}`);
+        resolve(ok);
+        return;
+      }
       modal.classList.remove("hidden", "kind-warn", "kind-bad", "kind-ok", "kind-info");
       modal.classList.add(`kind-${kind || "warn"}`);
       $("confirm-kicker").textContent = kicker;
@@ -72,21 +83,49 @@
       state.confirmResolver = resolve;
       document.body.classList.add("modal-open");
       document.addEventListener("keydown", onConfirmKeydown);
-      // focus primary action for keyboard users
-      requestAnimationFrame(() => $("confirm-ok").focus());
+      // Delay focus so the activating keyup/click cannot instantly confirm.
+      setTimeout(() => {
+        const okBtn = $("confirm-ok");
+        if (okBtn && state.confirmResolver) okBtn.focus();
+      }, 50);
     });
   }
 
   function setupConfirmModal() {
     const modal = $("confirm-modal");
+    if (!modal) return;
     modal.querySelectorAll("[data-confirm-dismiss]").forEach((el) => {
-      el.addEventListener("click", () => closeConfirm(false));
+      el.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        closeConfirm(false);
+      });
     });
-    $("confirm-ok").addEventListener("click", () => closeConfirm(true));
+    const ok = $("confirm-ok");
+    if (ok) {
+      ok.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        closeConfirm(true);
+      });
+    }
+  }
+
+  function setPolicyStatus(kind, text) {
+    const el = $("policy-status");
+    if (!el) return;
+    el.className = `policy-status ${kind || "muted"}`;
+    el.textContent = text || "";
   }
 
   function showToast(kind, title, body, holdMs = 8000) {
     const toast = $("toast");
+    if (!toast) {
+      // Last-resort feedback if toast node is missing.
+      console[kind === "bad" ? "error" : "log"](title, body || "");
+      setPolicyStatus(kind === "bad" ? "bad" : kind === "warn" ? "warn" : "ok", `${title}${body ? `: ${body}` : ""}`);
+      return;
+    }
     toast.className = `toast ${kind || "ok"}`;
     toast.innerHTML = `
       <div>
@@ -100,6 +139,10 @@
     if (holdMs > 0) {
       state.toastTimer = setTimeout(hideToast, holdMs);
     }
+    setPolicyStatus(
+      kind === "bad" ? "bad" : kind === "warn" ? "warn" : kind === "ok" ? "ok" : "muted",
+      title
+    );
   }
 
   function hideToast() {
@@ -459,41 +502,60 @@
     renderPolicyEditor();
   }
 
+  function fieldValue(card, selector, fallback = "") {
+    const el = card.querySelector(selector);
+    if (!el) return fallback;
+    if (el.type === "checkbox") return el.checked;
+    return String(el.value ?? fallback);
+  }
+
   function collectInstallationDraftFromDom() {
     const cards = [...document.querySelectorAll(".install-card")];
     const installations = {};
     for (const card of cards) {
-      const key = card.querySelector('[data-field="install_key"]').value.trim();
+      const key = fieldValue(card, '[data-field="install_key"]').trim();
       if (!key) continue;
       installations[key] = {
-        account: card.querySelector('[data-field="account"]').value.trim(),
-        installation_id: Number(card.querySelector('[data-field="installation_id"]').value || 0),
-        scope: card.querySelector('[data-field="scope"]').value,
-        runner_group_id: Number(card.querySelector('[data-field="runner_group_id"]').value || 1),
+        account: fieldValue(card, '[data-field="account"]').trim(),
+        installation_id: Number(fieldValue(card, '[data-field="installation_id"]', "0") || 0),
+        scope: fieldValue(card, '[data-field="scope"]', "repository") || "repository",
+        runner_group_id: Number(fieldValue(card, '[data-field="runner_group_id"]', "1") || 1),
       };
     }
     return installations;
   }
 
   function collectPolicyDraftFromDom() {
-    const cards = [...document.querySelectorAll(".policy-card")];
+    // Only repository cards — not installation cards (also .policy-card style).
+    const cards = [...document.querySelectorAll("#policy-editor .policy-card")];
     const repositories = {};
     for (const card of cards) {
-      const repo = card.querySelector('[data-field="repository"]').value.trim();
+      const repo = fieldValue(card, '[data-field="repository"]').trim();
       if (!repo) continue;
       const modes = [...card.querySelectorAll('[data-field="allowed_modes"]:checked')].map((el) => el.value);
       const events = [...card.querySelectorAll('[data-field="allowed_events"]:checked')].map((el) => el.value);
       const labels = [...card.querySelectorAll('[data-field="required_labels"]:checked')].map((el) => el.value);
       repositories[repo] = {
-        github_installation: card.querySelector('[data-field="github_installation"]').value,
-        default_mode: card.querySelector('[data-field="default_mode"]').value,
-        warm_capacity: Number(card.querySelector('[data-field="warm_capacity"]').value || 0),
+        github_installation: fieldValue(card, '[data-field="github_installation"]'),
+        default_mode: fieldValue(card, '[data-field="default_mode"]', "ephemeral") || "ephemeral",
+        warm_capacity: Number(fieldValue(card, '[data-field="warm_capacity"]', "0") || 0),
         allowed_modes: modes,
         allowed_events: events,
         required_labels: labels,
       };
     }
     return repositories;
+  }
+
+  function formatApiError(body, status) {
+    const detail = body?.detail ?? body?.message ?? body?.error;
+    if (detail == null || detail === "") return `HTTP ${status}`;
+    if (typeof detail === "string") return detail;
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return String(detail);
+    }
   }
 
   function renderInstallationEditor() {
@@ -698,35 +760,73 @@
       syncPolicyDraftFromServer(server, { force: true });
       showToast("info", "Policies reset", "Draft restaurado a partir do servidor.", 5000);
     });
-    $("btn-policy-save").addEventListener("click", async () => {
-      const installations = collectInstallationDraftFromDom();
-      const repositories = collectPolicyDraftFromDom();
+    $("btn-policy-save").addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const saveBtn = $("btn-policy-save");
+      if (state.actionInFlight) {
+        showToast("warn", "Aguarde", "Já existe uma ação em andamento.", 4000);
+        return;
+      }
+      let installations;
+      let repositories;
+      try {
+        installations = collectInstallationDraftFromDom();
+        repositories = collectPolicyDraftFromDom();
+      } catch (error) {
+        showToast("bad", "Falha ao ler o formulário", String(error.message || error), 12000);
+        return;
+      }
       state.installationDraft = installations;
       state.policyDraft = repositories;
       if (!Object.keys(installations).length) {
-        showToast("bad", "Policies inválidas", "Mantenha ao menos uma GitHub installation.", 8000);
+        showToast(
+          "bad",
+          "Policies inválidas",
+          "Nenhuma installation no formulário. Preencha Key + Account + Installation ID.",
+          10000
+        );
         return;
       }
       if (!Object.keys(repositories).length) {
-        showToast("bad", "Policies inválidas", "Mantenha ao menos um repositório.", 8000);
+        showToast(
+          "bad",
+          "Policies inválidas",
+          "Nenhum repositório no formulário. Use Owner/Name e selecione a installation.",
+          10000
+        );
         return;
       }
       const names = Object.keys(repositories);
       const instNames = Object.keys(installations);
-      const ok = await confirmAction({
-        kind: "ok",
-        kicker: "Policies",
-        title: "Salvar e aplicar policies?",
-        body: `${instNames.length} installation(s):\n${instNames
-          .map((n) => `· ${n} → ${installations[n].account} (id ${installations[n].installation_id})`)
-          .join("\n")}\n\n${names.length} repositório(s):\n${names
-          .map((n) => `· ${n}`)
-          .join("\n")}\n\nGrava override, recarrega o orchestrator e sincroniza o allowlist do broker.`,
-        confirmLabel: "Salvar e aplicar",
-        cancelLabel: "Cancelar",
-      });
-      if (!ok) return;
+      showToast("info", "Confirme o save", "Abra o diálogo e confirme para aplicar.", 4000);
+      let ok = false;
+      try {
+        ok = await confirmAction({
+          kind: "ok",
+          kicker: "Policies",
+          title: "Salvar e aplicar policies?",
+          body: `${instNames.length} installation(s):\n${instNames
+            .map((n) => `· ${n} → ${installations[n].account} (id ${installations[n].installation_id})`)
+            .join("\n")}\n\n${names.length} repositório(s):\n${names
+            .map((n) => `· ${n}`)
+            .join("\n")}\n\nGrava override, recarrega o orchestrator e sincroniza o allowlist do broker.`,
+          confirmLabel: "Salvar e aplicar",
+          cancelLabel: "Cancelar",
+        });
+      } catch (error) {
+        showToast("bad", "Falha no diálogo de confirmação", String(error.message || error), 10000);
+        return;
+      }
+      if (!ok) {
+        showToast("info", "Save cancelado", "Nada foi gravado.", 4000);
+        return;
+      }
       state.actionInFlight = true;
+      if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.classList.add("busy");
+      }
       showToast("warn", "Saving policies…", "Validando installations + repositórios", 0);
       try {
         const response = await fetch("/api/v1/admin/policies", {
@@ -744,7 +844,7 @@
         } catch {
           body = { detail: text };
         }
-        if (!response.ok) throw new Error(body.detail || body.message || `HTTP ${response.status}`);
+        if (!response.ok) throw new Error(formatApiError(body, response.status));
         state.policiesHydrated = false;
         state.policiesDirty = false;
         syncPolicyDraftFromServer(body.policies || { repositories, installations }, { force: true });
@@ -754,17 +854,22 @@
           `${body.message || "OK"}\n${body.broker_note || ""}`,
           15000
         );
-        const snap = await fetch(`/api/v1/snapshot?${queryString()}`, {
-          headers: { Accept: "application/json" },
-        });
-        if (snap.ok) {
-          const snapshot = await snap.json();
-          applySnapshot(snapshot);
+        try {
+          const snap = await fetch(`/api/v1/snapshot?${queryString()}`, {
+            headers: { Accept: "application/json" },
+          });
+          if (snap.ok) applySnapshot(await snap.json());
+        } catch {
+          // Save already succeeded; snapshot refresh is best-effort.
         }
       } catch (error) {
         showToast("bad", "Falha ao salvar policies", String(error.message || error), 15000);
       } finally {
         state.actionInFlight = false;
+        if (saveBtn) {
+          saveBtn.disabled = false;
+          saveBtn.classList.remove("busy");
+        }
       }
     });
   }
