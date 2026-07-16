@@ -149,7 +149,7 @@
         <td><span class="${statusClass(item.status)}">${escapeHtml(item.status)}</span></td>
         <td class="mono">${escapeHtml(item.repository || "—")}</td>
         <td class="mono">${escapeHtml(item.runner_name || "—")}</td>
-        <td class="mono">${escapeHtml(item.job_id ?? "—")}</td>
+        <td class="mono">${link(item.github_job_url || item.github_run_url, item.job_id)}</td>
         <td class="muted">${escapeHtml(fmtTs(item.updated_at))}</td>
       </tr>`;
       })
