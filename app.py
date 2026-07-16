@@ -260,15 +260,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not isinstance(repositories, dict):
             raise HTTPException(status_code=400, detail="body.repositories must be an object")
         try:
-            result = apply_repository_policies(orchestrator, repositories)
+            result = await apply_repository_policies(orchestrator, repositories)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            # Broker/network failures after validation.
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         # Keep FastAPI app.state aligned for any code reading it.
         app.state.settings = orchestrator.settings
         return result
 
     ui_dir = ui_directory()
-    asset_version = "20260716-3"
+    asset_version = "20260716-4"
     if ui_dir.is_dir():
         @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
         async def root_redirect() -> RedirectResponse:
