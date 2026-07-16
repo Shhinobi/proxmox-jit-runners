@@ -24,6 +24,23 @@
   </header>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+    <div class="modal-backdrop" data-confirm-dismiss></div>
+    <div class="modal-card">
+      <div class="modal-accent" id="confirm-accent"></div>
+      <div class="modal-content">
+        <div class="modal-kicker" id="confirm-kicker">Confirmar</div>
+        <h3 class="modal-title" id="confirm-title">Confirmar ação</h3>
+        <p class="modal-body" id="confirm-body"></p>
+        <div class="modal-actions">
+          <button type="button" class="btn ghost" id="confirm-cancel" data-confirm-dismiss>Cancelar</button>
+          <button type="button" class="btn" id="confirm-ok">Confirmar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <section class="alerts" id="alerts"></section>
   <section class="cards" id="cards"></section>
 
