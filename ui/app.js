@@ -169,14 +169,57 @@
     return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label || "open")}</a>`;
   }
 
+  function operationalBadge(overview) {
+    // Prefer explicit API status; fall back for older orchestrator builds.
+    const status =
+      overview.status ||
+      (!overview.ready
+        ? "not_ready"
+        : overview.drain
+          ? "draining"
+          : overview.shadow_mode
+            ? "shadow"
+            : "ready");
+    switch (status) {
+      case "not_ready":
+        return badge("not ready", "bad");
+      case "draining":
+        return badge("draining", "warn");
+      case "shadow":
+        return badge("shadow", "warn");
+      default:
+        return badge("ready", "ok");
+    }
+  }
+
+  function renderBadges(overview) {
+    const items = [operationalBadge(overview)];
+    // Secondary context — avoid duplicating the primary status label.
+    if (overview.drain && overview.status !== "draining" && overview.status) {
+      items.push(badge("drain", "warn"));
+    } else if (!overview.drain) {
+      items.push(badge("accepting", "ok"));
+    } else {
+      items.push(badge("jobs paused", "warn"));
+    }
+    if (overview.shadow_mode && overview.status !== "shadow") {
+      items.push(badge("shadow", "warn"));
+    } else if (!overview.shadow_mode) {
+      items.push(badge("live", "ok"));
+    }
+    items.push(badge(`node ${overview.proxmox?.node || "?"}`, "info"));
+    // Health probe still green while draining — surface that explicitly.
+    if (overview.drain && overview.ready) {
+      items.push(badge("health ok", "info"));
+    } else if (!overview.ready) {
+      items.push(badge("health fail", "bad"));
+    }
+    $("badges").innerHTML = items.join("");
+  }
+
   function renderOverview(overview) {
     const caps = overview.capacity || {};
-    $("badges").innerHTML = [
-      badge(overview.ready ? "ready" : "not ready", overview.ready ? "ok" : "bad"),
-      badge(overview.shadow_mode ? "shadow" : "live", overview.shadow_mode ? "warn" : "ok"),
-      badge(overview.drain ? "drain" : "accepting", overview.drain ? "warn" : "ok"),
-      badge(`node ${overview.proxmox?.node || "?"}`, "info"),
-    ].join("");
+    renderBadges(overview);
     $("cards").innerHTML = [
       card("Queue", caps.queued ?? 0),
       card("Active", `${caps.active ?? 0}/${caps.max_active ?? "?"}`),
@@ -644,12 +687,7 @@
       renderOverview(snapshot.overview || {});
     } else {
       const caps = snapshot.overview?.capacity || {};
-      $("badges").innerHTML = [
-        badge(snapshot.overview?.ready ? "ready" : "not ready", snapshot.overview?.ready ? "ok" : "bad"),
-        badge(snapshot.overview?.shadow_mode ? "shadow" : "live", snapshot.overview?.shadow_mode ? "warn" : "ok"),
-        badge(snapshot.overview?.drain ? "drain" : "accepting", snapshot.overview?.drain ? "warn" : "ok"),
-        badge(`node ${snapshot.overview?.proxmox?.node || "?"}`, "info"),
-      ].join("");
+      renderBadges(snapshot.overview || {});
       $("cards").innerHTML = [
         card("Queue", caps.queued ?? 0),
         card("Active", `${caps.active ?? 0}/${caps.max_active ?? "?"}`),
