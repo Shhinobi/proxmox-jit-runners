@@ -8,7 +8,11 @@ from prometheus_client import REGISTRY
 
 from .config import (
     ConfigError,
+    GitHubInstallation,
     Settings,
+    _load_yaml,
+    config_path,
+    parse_repository_policies,
     repository_policy_to_dict,
     save_repository_policies,
 )
@@ -42,17 +46,33 @@ def public_policies(settings: Settings) -> dict[str, Any]:
         ],
         "label_options": ["self-hosted", "proxmox-lxc", "crossbuild"],
         "broker_note": (
-            "Repository policy is applied immediately. New repos also need the broker "
-            "allowlist on pve (/etc/runner-broker-repositories) and GitHub App access."
+            "Saving policies updates the orchestrator immediately and syncs the broker "
+            "allowlist on pve. GitHub App access must still include each repository."
         ),
     }
 
 
-def apply_repository_policies(
+async def apply_repository_policies(
     orchestrator: Orchestrator,
     repositories: dict[str, Any],
 ) -> dict[str, Any]:
-    """Validate, persist, and hot-reload repository policies."""
+    """Validate, sync broker allowlist, persist, and hot-reload repository policies."""
+    try:
+        raw = _load_yaml(config_path())
+        installations = {
+            name: GitHubInstallation(
+                account=str(value["account"]),
+                installation_id=int(value["installation_id"]),
+                scope=str(value["scope"]),
+                runner_group_id=int(value.get("runner_group_id", 1)),
+            )
+            for name, value in raw["github"]["installations"].items()
+        }
+        parsed = parse_repository_policies(repositories, installations)
+    except ConfigError as exc:
+        raise ValueError(str(exc)) from exc
+
+    broker_result = await orchestrator.broker.sync_allowlist(list(parsed.keys()))
     try:
         new_settings = save_repository_policies(repositories)
     except ConfigError as exc:
@@ -62,12 +82,15 @@ def apply_repository_policies(
         "ok": True,
         "action": "save-policies",
         "message": (
-            f"Saved {len(new_settings.repositories)} repository policy(ies) and reloaded."
+            f"Saved {len(new_settings.repositories)} repository policy(ies), "
+            f"synced broker allowlist ({broker_result}), and reloaded."
         ),
         "policies": public_policies(new_settings),
+        "broker_synced": True,
+        "broker_result": broker_result,
         "broker_note": (
-            "If you added repositories, append OWNER/NAME to "
-            "/etc/runner-broker-repositories on pve and ensure the GitHub App is installed."
+            "Broker allowlist on pve was updated automatically. "
+            "GitHub App access must still include each repository."
         ),
     }
 

@@ -51,3 +51,13 @@ class BrokerClient:
     async def cache_ready(self, repository: str) -> bool:
         output = await self._run(f"cache-ready {repository}")
         return output == "ready"
+
+    async def sync_allowlist(self, repositories: list[str]) -> str:
+        """Replace the broker allowlist with the given OWNER/REPO entries."""
+        if not repositories:
+            raise BrokerError("sync-allowlist requires at least one repository")
+        # Keep argv simple and deterministic for the forced-command broker.
+        repos = " ".join(sorted({repo.strip() for repo in repositories if repo.strip()}))
+        if not repos:
+            raise BrokerError("sync-allowlist requires at least one repository")
+        return await self._run(f"sync-allowlist {repos}")
