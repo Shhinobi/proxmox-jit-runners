@@ -276,12 +276,24 @@ async def build_overview(orchestrator: Orchestrator, settings: Settings) -> dict
             delete_failed += int(row["total"])
     warm_target = sum(int(policy.warm_capacity) for policy in settings.repositories.values())
     queued = next((int(row["total"]) for row in summary["jobs"] if row["status"] == "queued"), 0)
+    drain = orchestrator.draining
+    # Operational status for the dashboard primary badge (health probes keep
+    # using `ready` independently so drain does not trip /health/ready).
+    if not ready:
+        status = "not_ready"
+    elif drain:
+        status = "draining"
+    elif settings.shadow_mode:
+        status = "shadow"
+    else:
+        status = "ready"
     overview = {
         "generated_at": int(time.time()),
         "ready": ready,
+        "status": status,
         "checks": checks,
         "shadow_mode": settings.shadow_mode,
-        "drain": orchestrator.draining,
+        "drain": drain,
         "capacity": {
             "max_active": settings.capacity.max_active,
             "pool_size": settings.capacity.pool_size,
