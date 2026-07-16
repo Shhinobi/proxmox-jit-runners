@@ -490,22 +490,23 @@ class Orchestrator:
                 and instance.get("repository")
                 and instance.get("runner_name")
             ):
-                installation = self._installation(str(instance["repository"]))
-                runner = await self.github.find_runner(
-                    installation,
-                    str(instance["repository"]),
-                    str(instance["runner_name"]),
-                )
-                if runner and runner.get("busy", False):
-                    self.log(
-                        "warn",
-                        "destroy",
-                        f"cleanup deferred; GitHub runner still busy",
-                        vmid=vmid,
-                        runner_name=instance.get("runner_name"),
-                        repository=instance.get("repository"),
+                installation = self._installation_for_cleanup(str(instance["repository"]))
+                if installation is not None:
+                    runner = await self.github.find_runner(
+                        installation,
+                        str(instance["repository"]),
+                        str(instance["runner_name"]),
                     )
-                    return
+                    if runner and runner.get("busy", False):
+                        self.log(
+                            "warn",
+                            "destroy",
+                            "cleanup deferred; GitHub runner still busy",
+                            vmid=vmid,
+                            runner_name=instance.get("runner_name"),
+                            repository=instance.get("repository"),
+                        )
+                        return
             transitioned = await self.db.transition_instance(
                 instance["id"], {str(instance["status"])}, "deleting", error=None
             )
@@ -519,22 +520,33 @@ class Orchestrator:
                 )
                 return
             if instance["mode"] == "warm" and instance.get("repository") and instance.get("runner_name"):
-                installation = self._installation(str(instance["repository"]))
-                runner = await self.github.find_runner(
-                    installation, str(instance["repository"]), str(instance["runner_name"])
-                )
-                if runner:
-                    await self.github.delete_runner(
-                        installation, str(instance["repository"]), int(runner["id"])
-                    )
-                    self.log(
-                        "info",
-                        "destroy",
-                        f"deleted GitHub runner {instance.get('runner_name')}",
-                        vmid=vmid,
-                        runner_id=runner.get("id"),
-                        repository=instance.get("repository"),
-                    )
+                installation = self._installation_for_cleanup(str(instance["repository"]))
+                if installation is not None:
+                    candidates = [str(instance["repository"])]
+                    for configured in self.settings.repositories:
+                        if configured not in candidates:
+                            candidates.append(configured)
+                    runner = None
+                    found_repo = str(instance["repository"])
+                    for candidate in candidates:
+                        runner = await self.github.find_runner(
+                            installation, candidate, str(instance["runner_name"])
+                        )
+                        if runner:
+                            found_repo = candidate
+                            break
+                    if runner:
+                        await self.github.delete_runner(
+                            installation, found_repo, int(runner["id"])
+                        )
+                        self.log(
+                            "info",
+                            "destroy",
+                            f"deleted GitHub runner {instance.get('runner_name')}",
+                            vmid=vmid,
+                            runner_id=runner.get("id"),
+                            repository=found_repo,
+                        )
             await self.proxmox.destroy(vmid)
             await self.db.delete_instance(instance["id"])
             self.log(
@@ -594,31 +606,12 @@ class Orchestrator:
                 await self._destroy_instance(instance)
             elif instance["mode"] == "persistent" and instance["status"] == "ready" and idle > self.settings.capacity.persistent_idle_seconds:
                 await self._destroy_instance(instance)
-            elif instance["mode"] == "warm" and instance["status"] == "ready":
-                try:
-                    installation = self._installation(str(instance["repository"]))
-                    resolved = repository_policy(
-                        self.settings, str(instance["repository"])
-                    )
-                    runner = await self.github.find_runner(
-                        installation,
-                        str(instance["repository"]),
-                        str(instance["runner_name"]),
-                    )
-                    if runner is None or runner.get("status") != "online":
-                        await self._destroy_instance(instance)
-                    elif resolved is None or not set(
-                        self._warm_labels(resolved[1])
-                    ).issubset({
-                        str(label.get("name", "")).lower()
-                        for label in runner.get("labels", [])
-                        if isinstance(label, dict)
-                    }):
-                        await self._destroy_instance(instance)
-                except Exception:
-                    LOGGER.exception(
-                        "warm runner health check failed", extra={"vmid": instance["vmid"]}
-                    )
+            elif instance["mode"] == "warm" and instance["status"] in {
+                "ready",
+                "provisioning",
+                "reserved",
+            }:
+                await self._reconcile_warm_instance(instance)
             elif instance["status"] == "running" and age > self.settings.capacity.max_job_seconds:
                 await self._destroy_instance(instance)
 
@@ -626,6 +619,69 @@ class Orchestrator:
             await self._replenish_warm_pool()
             await self._replenish_pool()
         await self._update_metrics()
+
+    async def _reconcile_warm_instance(self, instance: dict[str, Any]) -> None:
+        """Health-check warm runners and retire orphans after policy renames."""
+        repo = str(instance.get("repository") or "")
+        resolved = repository_policy(self.settings, repo) if repo else None
+        if resolved is None:
+            # Handle rename (MetalDevops → JustShinobi): old warms still count
+            # against max_active and block replenishment for the new policy name.
+            self.log(
+                "warn",
+                "warm",
+                "retiring orphan warm (repository no longer in policy)",
+                vmid=instance.get("vmid"),
+                repository=repo or None,
+                status=instance.get("status"),
+            )
+            await self._destroy_instance(instance)
+            return
+        canonical_repo, policy = resolved
+        if repo != canonical_repo:
+            await self.db.update_instance(
+                int(instance["id"]),
+                str(instance["status"]),
+                repository=canonical_repo,
+            )
+            instance = {**instance, "repository": canonical_repo}
+            self.log(
+                "info",
+                "warm",
+                f"rebound warm repository {repo!r} → {canonical_repo!r}",
+                vmid=instance.get("vmid"),
+            )
+        if instance["status"] != "ready":
+            return
+        try:
+            installation = self._installation(canonical_repo)
+            runner = await self.github.find_runner(
+                installation,
+                canonical_repo,
+                str(instance["runner_name"]),
+            )
+            if runner is None or runner.get("status") != "online":
+                await self._destroy_instance(instance)
+                return
+            if not set(self._warm_labels(policy)).issubset(
+                {
+                    str(label.get("name", "")).lower()
+                    for label in runner.get("labels", [])
+                    if isinstance(label, dict)
+                }
+            ):
+                await self._destroy_instance(instance)
+        except Exception as exc:
+            self.events.exception(
+                "warm",
+                f"warm runner health check failed vmid={instance.get('vmid')}",
+                exc,
+                vmid=instance.get("vmid"),
+                repository=canonical_repo,
+            )
+            LOGGER.exception(
+                "warm runner health check failed", extra={"vmid": instance["vmid"]}
+            )
 
     async def _replenish_pool(self) -> None:
         async with self._pool_lock:
@@ -665,6 +721,19 @@ class Orchestrator:
         self, repository: str, policy: RepositoryPolicy
     ) -> bool:
         started = time.monotonic()
+        active = await self.db.count_active()
+        max_active = self.settings.capacity.max_active
+        if active >= max_active:
+            self.log(
+                "warn",
+                "warm",
+                "warm reserve failed: capacity full "
+                f"(active={active}/{max_active}; free capacity or recycle orphan warms)",
+                repository=repository,
+                active=active,
+                max_active=max_active,
+            )
+            return False
         reservation = await self._reserve_instance(
             "warm", repository, None, None, enforce_capacity=True
         )
@@ -672,8 +741,10 @@ class Orchestrator:
             self.log(
                 "warn",
                 "warm",
-                "warm reserve failed (capacity or IP range)",
+                "warm reserve failed (VMID/IP range exhausted)",
                 repository=repository,
+                active=active,
+                max_active=max_active,
             )
             return False
         instance_id, vmid, ip_address = reservation
@@ -907,3 +978,12 @@ class Orchestrator:
             raise KeyError(f"repository policy not found: {repository}")
         _, policy = resolved
         return self.settings.github.installations[policy.github_installation]
+
+    def _installation_for_cleanup(self, repository: str) -> GitHubInstallation | None:
+        """Resolve installation for destroy; fall back when policy was removed/renamed."""
+        try:
+            return self._installation(repository)
+        except KeyError:
+            if self.settings.github.installations:
+                return next(iter(self.settings.github.installations.values()))
+            return None

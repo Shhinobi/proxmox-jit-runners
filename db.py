@@ -279,7 +279,7 @@ class Database:
             row = await (
                 await db.execute(
                     """SELECT * FROM instances
-                       WHERE mode='warm' AND repository=? AND status='ready'
+                       WHERE mode='warm' AND LOWER(repository)=LOWER(?) AND status='ready'
                        ORDER BY created_at LIMIT 1""",
                     (repository,),
                 )
@@ -288,29 +288,52 @@ class Database:
                 await db.rollback()
                 return None
             now = int(time.time())
+            # Keep repository field aligned with the policy's canonical casing.
             await db.execute(
                 """UPDATE instances
-                   SET status='reserved', job_id=?, updated_at=?, last_used_at=?
+                   SET status='reserved', job_id=?, repository=?, updated_at=?, last_used_at=?
                    WHERE id=?""",
-                (job_id, now, now, row["id"]),
+                (job_id, repository, now, now, row["id"]),
             )
             await db.commit()
             result = dict(row)
-            result.update(status="reserved", job_id=job_id, updated_at=now, last_used_at=now)
+            result.update(
+                status="reserved",
+                job_id=job_id,
+                repository=repository,
+                updated_at=now,
+                last_used_at=now,
+            )
             return result
 
     async def count_warm_supply(self, repository: str) -> int:
         row = await self._fetchone(
             """SELECT COUNT(*) AS total FROM instances
-               WHERE mode='warm' AND repository=? AND status IN ('provisioning','ready')""",
+               WHERE mode='warm' AND LOWER(repository)=LOWER(?)
+                 AND status IN ('provisioning','ready')""",
             (repository,),
         )
         return int((row or {"total": 0})["total"])
 
+    async def rebind_warm_repository(self, from_repository: str, to_repository: str) -> int:
+        """Point warm instances at a renamed policy repository (exact match)."""
+        if from_repository == to_repository:
+            return 0
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """UPDATE instances
+                   SET repository=?, updated_at=?
+                   WHERE mode='warm' AND LOWER(repository)=LOWER(?)
+                     AND status IN ('provisioning','ready','reserved','running')""",
+                (to_repository, int(time.time()), from_repository),
+            )
+            await db.commit()
+            return int(cursor.rowcount or 0)
+
     async def find_persistent(self, repository: str) -> dict[str, Any] | None:
         return await self._fetchone(
             """SELECT * FROM instances
-               WHERE mode='persistent' AND repository=? AND status='ready'
+               WHERE mode='persistent' AND LOWER(repository)=LOWER(?) AND status='ready'
                ORDER BY last_used_at DESC LIMIT 1""",
             (repository,),
         )
