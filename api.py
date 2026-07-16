@@ -244,5 +244,25 @@ def set_drain(enabled: bool) -> dict[str, Any]:
     return {"drain": DRAIN_MARKER.exists(), "marker": str(DRAIN_MARKER)}
 
 
+async def recycle_ready(orchestrator: Orchestrator) -> dict[str, Any]:
+    """Schedule ready pool/warm clones for recycle and run reconcile immediately."""
+    before = await orchestrator.db.status_summary()
+    result = await orchestrator.db.schedule_ready_recycle()
+    await orchestrator.reconcile()
+    after = await orchestrator.db.status_summary()
+    return {
+        "ok": True,
+        "action": "recycle-ready",
+        "scheduled": result["scheduled"],
+        "message": (
+            f"Scheduled {result['scheduled']} ready pool/warm instance(s) for recycle "
+            "and ran reconcile."
+        ),
+        "before": before,
+        "after": after,
+        "drain": orchestrator.draining,
+    }
+
+
 def ui_directory() -> Path:
     return Path(__file__).resolve().parent / "ui"

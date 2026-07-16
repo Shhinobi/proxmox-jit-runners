@@ -473,6 +473,36 @@ class Database:
         rows.reverse()  # chronological for charts
         return rows
 
+    async def schedule_ready_recycle(self) -> dict[str, Any]:
+        """Mark ready pool/warm instances for deletion so reconcile can rebuild them.
+
+        Refuses when any non-ready instance exists (busy provision/run path).
+        """
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            busy = await (
+                await db.execute(
+                    "SELECT vmid, mode, status FROM instances WHERE status NOT IN ('ready')"
+                )
+            ).fetchall()
+            if busy:
+                await db.rollback()
+                details = [
+                    {"vmid": int(row["vmid"]), "mode": row["mode"], "status": row["status"]}
+                    for row in busy
+                ]
+                raise RuntimeError(f"refusing recycle with non-ready instances: {details}")
+            cursor = await db.execute(
+                """
+                UPDATE instances
+                SET status='delete_pending', updated_at=?
+                WHERE status='ready' AND mode IN ('pool', 'warm')
+                """,
+                (int(time.time()),),
+            )
+            await db.commit()
+            return {"scheduled": int(cursor.rowcount)}
+
     async def _execute(self, sql: str, parameters: tuple[Any, ...] = ()) -> None:
         async with self.connect() as db:
             await db.execute(sql, parameters)
