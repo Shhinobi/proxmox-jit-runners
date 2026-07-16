@@ -53,6 +53,15 @@ class GitHubClient:
     def _raise(response: httpx.Response) -> None:
         if response.is_error:
             raise GitHubError(f"GitHub API {response.status_code}: {response.text[:500]}")
+        # Unfollowed redirects (or unexpected 3xx bodies) produce empty payloads and
+        # later KeyErrors like missing encoded_jit_config. Fail clearly instead.
+        if 300 <= response.status_code < 400:
+            location = response.headers.get("location", "")
+            raise GitHubError(
+                f"GitHub API {response.status_code} redirect without follow "
+                f"(location={location!r}). Repository may have been renamed; "
+                f"update Policies installation account + repository owner."
+            )
 
     async def request(
         self,
@@ -62,12 +71,23 @@ class GitHubClient:
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         token = await self._token(installation)
-        async with httpx.AsyncClient(timeout=30) as client:
+        # follow_redirects: GitHub returns 307 when a user/org/repo was renamed
+        # (e.g. OldOwner → acme). Without following, generate-jitconfig
+        # returns an empty body and callers crash on missing encoded_jit_config.
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             response = await client.request(
                 method, f"{self.config.api_url}{path}", headers=self._headers(token), json=json
             )
         self._raise(response)
-        return response.json() if response.content else {}
+        if not response.content:
+            return {}
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise GitHubError(
+                f"GitHub API {response.status_code}: non-JSON body: {response.text[:300]}"
+            ) from exc
+        return data if isinstance(data, dict) else {"_items": data}
 
     async def get_workflow_run(
         self, installation: GitHubInstallation, repository: str, run_id: int
@@ -82,7 +102,7 @@ class GitHubClient:
         labels: list[str],
     ) -> dict[str, Any]:
         base = self._runner_base(installation, repository)
-        return await self.request(
+        data = await self.request(
             installation,
             "POST",
             f"{base}/actions/runners/generate-jitconfig",
@@ -93,6 +113,14 @@ class GitHubClient:
                 "work_folder": "_work",
             },
         )
+        if not data.get("encoded_jit_config"):
+            raise GitHubError(
+                "GitHub generate-jitconfig response missing encoded_jit_config "
+                f"for {repository!r} (keys={sorted(data.keys())}). "
+                "If the GitHub handle/repo was renamed, update Policies to the "
+                "new owner/name and installation account."
+            )
+        return data
 
     async def registration_token(
         self, installation: GitHubInstallation, repository: str

@@ -135,23 +135,62 @@ class ProxmoxClient:
             upid = await self.request("POST", f"/nodes/{self.config.node}/lxc/{vmid}/status/stop")
             await self.wait_task(str(upid), timeout=90)
         except ProxmoxError as exc:
-            if "not running" not in str(exc).lower():
-                raise
+            msg = str(exc).lower()
+            if any(
+                token in msg
+                for token in (
+                    "not running",
+                    "does not exist",
+                    "no such container",
+                    "configuration file does not exist",
+                )
+            ):
+                return
+            raise
 
     async def destroy(self, vmid: int) -> None:
-        await self.stop(vmid)
-        config = await self.request("GET", f"/nodes/{self.config.node}/lxc/{vmid}/config")
-        if config.get("mp0"):
+        try:
+            current = await self.status(vmid)
+        except ProxmoxError as exc:
+            msg = str(exc).lower()
+            if any(
+                token in msg
+                for token in ("does not exist", "no such container", "configuration file does not exist")
+            ):
+                return
+            raise
+        if str(current.get("status", "")).lower() == "running":
+            await self.stop(vmid)
+        try:
+            config = await self.request("GET", f"/nodes/{self.config.node}/lxc/{vmid}/config")
+        except ProxmoxError as exc:
+            msg = str(exc).lower()
+            if any(
+                token in msg
+                for token in ("does not exist", "no such container", "configuration file does not exist")
+            ):
+                return
+            raise
+        if config and config.get("mp0"):
             await self.request(
                 "PUT",
                 f"/nodes/{self.config.node}/lxc/{vmid}/config",
                 {"delete": "mp0"},
             )
-        upid = await self.request(
-            "DELETE",
-            f"/nodes/{self.config.node}/lxc/{vmid}",
-        )
-        await self.wait_task(str(upid))
+        try:
+            upid = await self.request(
+                "DELETE",
+                f"/nodes/{self.config.node}/lxc/{vmid}",
+            )
+            await self.wait_task(str(upid))
+        except ProxmoxError as exc:
+            msg = str(exc).lower()
+            if any(
+                token in msg
+                for token in ("does not exist", "no such container", "configuration file does not exist")
+            ):
+                return
+            raise
 
     async def status(self, vmid: int) -> dict[str, Any]:
         data = await self.request("GET", f"/nodes/{self.config.node}/lxc/{vmid}/status/current")
