@@ -1,0 +1,83 @@
+database_path: /var/lib/runner-orchestrator/state.db
+log_level: INFO
+shadow_mode: false
+drain: false
+
+github:
+  app_id: ""
+  private_key_file: /run/credentials/github_app_private_key
+  webhook_secret_file: /run/credentials/github_webhook_secret
+  api_url: https://api.github.com
+  api_version: "2022-11-28"
+  installations:
+    metaldevops-personal:
+      account: MetalDevops
+      installation_id: 146433491
+      scope: repository
+      runner_group_id: 1
+    # Adicione a instalação da organização quando os IDs forem conhecidos:
+    # minha-org:
+    #   account: NomeDaOrganizacao
+    #   installation_id: 000000000
+    #   scope: organization
+    #   runner_group_id: 2
+
+proxmox:
+  endpoint: https://pve01.lan.kyo.ninja
+  api_token_file: /run/credentials/proxmox_api_token
+  node: pve02
+  template_vmid: 9101
+  storage: local-lvm
+  bridge: vci
+  gateway: 10.20.60.1
+  vmid_start: 5000
+  vmid_end: 5099
+  ip_start: 100
+  ip_end: 199
+  verify_tls: true
+
+broker:
+  host: 192.168.68.159
+  user: runner-broker
+  key_file: /run/credentials/runner_broker_ssh_key
+  known_hosts_file: /etc/runner-orchestrator/ssh_known_hosts
+
+cache:
+  root: /srv/runner-cache
+  mount_path: /cache
+  max_usage_percent: 80
+  quota_gb: 40
+
+capacity:
+  max_active: 2
+  pool_size: 1
+  ready_timeout_seconds: 300
+  max_job_seconds: 10800
+  persistent_idle_seconds: 86400
+  reconcile_seconds: 60
+
+profiles:
+  crossbuild-small:
+    cores: 6
+    memory_mb: 4096
+    swap_mb: 2048
+    rootfs_gb: 25
+
+repositories:
+  MetalDevops/NinjaCrawler:
+    github_installation: metaldevops-personal
+    default_mode: ephemeral
+    warm_capacity: 1
+    allowed_modes: [ephemeral, pool, persistent]
+    allowed_events: [push, workflow_dispatch, schedule]
+    required_labels: [self-hosted, proxmox-lxc, crossbuild]
+  # Staging repo for pre-cutover workflow validation (no dedicated warm).
+  # pull_request is allowed here only for migration CI validation; production
+  # NinjaCrawler keeps pull_request blocked.
+  MetalDevops/NinjaCrawler-Temp:
+    github_installation: metaldevops-personal
+    default_mode: pool
+    warm_capacity: 0
+    allowed_modes: [ephemeral, pool, persistent]
+    allowed_events: [push, workflow_dispatch, schedule, pull_request]
+    required_labels: [self-hosted, proxmox-lxc, crossbuild]
