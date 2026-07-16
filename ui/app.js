@@ -5,6 +5,7 @@
     lastSnapshot: null,
     toastTimer: null,
     actionInFlight: false,
+    confirmResolver: null,
     policyDraft: null,
     policyMeta: {
       mode_options: ["ephemeral", "pool", "persistent"],
@@ -16,6 +17,68 @@
   };
 
   const $ = (id) => document.getElementById(id);
+
+  function closeConfirm(result) {
+    const modal = $("confirm-modal");
+    if (!modal || modal.classList.contains("hidden")) return;
+    modal.classList.add("hidden");
+    modal.classList.remove("kind-warn", "kind-bad", "kind-ok", "kind-info");
+    document.body.classList.remove("modal-open");
+    document.removeEventListener("keydown", onConfirmKeydown);
+    const resolve = state.confirmResolver;
+    state.confirmResolver = null;
+    if (resolve) resolve(Boolean(result));
+  }
+
+  function onConfirmKeydown(event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeConfirm(false);
+    } else if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      const active = document.activeElement;
+      if (active && active.id === "confirm-cancel") return;
+      event.preventDefault();
+      closeConfirm(true);
+    }
+  }
+
+  /** In-dashboard confirmation dialog. @returns {Promise<boolean>} */
+  function confirmAction({
+    title = "Confirmar ação",
+    body = "",
+    confirmLabel = "Confirmar",
+    cancelLabel = "Cancelar",
+    kind = "warn",
+    kicker = "Confirmar",
+  } = {}) {
+    return new Promise((resolve) => {
+      if (state.confirmResolver) {
+        state.confirmResolver(false);
+        state.confirmResolver = null;
+      }
+      const modal = $("confirm-modal");
+      modal.classList.remove("hidden", "kind-warn", "kind-bad", "kind-ok", "kind-info");
+      modal.classList.add(`kind-${kind || "warn"}`);
+      $("confirm-kicker").textContent = kicker;
+      $("confirm-title").textContent = title;
+      $("confirm-body").textContent = body;
+      $("confirm-ok").textContent = confirmLabel;
+      $("confirm-cancel").textContent = cancelLabel;
+      state.confirmResolver = resolve;
+      document.body.classList.add("modal-open");
+      document.addEventListener("keydown", onConfirmKeydown);
+      // focus primary action for keyboard users
+      requestAnimationFrame(() => $("confirm-ok").focus());
+    });
+  }
+
+  function setupConfirmModal() {
+    const modal = $("confirm-modal");
+    modal.querySelectorAll("[data-confirm-dismiss]").forEach((el) => {
+      el.addEventListener("click", () => closeConfirm(false));
+    });
+    $("confirm-ok").addEventListener("click", () => closeConfirm(true));
+  }
 
   function showToast(kind, title, body, holdMs = 8000) {
     const toast = $("toast");
@@ -321,11 +384,21 @@
       .join("");
     editor.innerHTML = cards || `<div class="empty">Nenhuma policy configurada. Clique em Add repository.</div>`;
     editor.querySelectorAll(".btn-policy-delete").forEach((button) => {
-      button.addEventListener("click", () => {
+      button.addEventListener("click", async () => {
         const card = button.closest(".policy-card");
         const repoInput = card?.querySelector('[data-field="repository"]');
         const repo = (repoInput?.value || button.getAttribute("data-repo") || "").trim();
-        if (!confirm(`Remover policy ${repo || "selecionada"}?`)) return;
+        const ok = await confirmAction({
+          kind: "bad",
+          kicker: "Policies",
+          title: "Remover policy?",
+          body: repo
+            ? `A policy de ${repo} será removida do draft. Salve depois para aplicar.`
+            : "A policy selecionada será removida do draft. Salve depois para aplicar.",
+          confirmLabel: "Remover",
+          cancelLabel: "Manter",
+        });
+        if (!ok) return;
         card?.remove();
         state.policyDraft = collectPolicyDraftFromDom();
         renderPolicyEditor();
@@ -344,7 +417,16 @@
       state.policyDraft[name] = defaultPolicy();
       renderPolicyEditor();
     });
-    $("btn-policy-reset").addEventListener("click", () => {
+    $("btn-policy-reset").addEventListener("click", async () => {
+      const ok = await confirmAction({
+        kind: "warn",
+        kicker: "Policies",
+        title: "Descartar alterações?",
+        body: "O draft local será restaurado a partir do servidor. Mudanças não salvas serão perdidas.",
+        confirmLabel: "Resetar draft",
+        cancelLabel: "Continuar editando",
+      });
+      if (!ok) return;
       const server = state.lastSnapshot?.policies?.repositories || {};
       state.policyDraft = JSON.parse(JSON.stringify(server));
       renderPolicyEditor();
@@ -356,7 +438,16 @@
         showToast("bad", "Policies inválidas", "Mantenha ao menos um repositório.", 8000);
         return;
       }
-      if (!confirm(`Salvar ${Object.keys(repositories).length} policy(ies) e aplicar agora?`)) return;
+      const names = Object.keys(repositories);
+      const ok = await confirmAction({
+        kind: "ok",
+        kicker: "Policies",
+        title: "Salvar e aplicar policies?",
+        body: `${names.length} repositório(s):\n${names.map((n) => `· ${n}`).join("\n")}\n\nGrava override, recarrega o orchestrator e sincroniza o allowlist do broker.`,
+        confirmLabel: "Salvar e aplicar",
+        cancelLabel: "Cancelar",
+      });
+      if (!ok) return;
       state.actionInFlight = true;
       showToast("warn", "Saving policies…", "Validando e gravando config.yaml", 0);
       try {
@@ -639,32 +730,49 @@
   }
 
   function setupAdmin() {
-    $("btn-drain").addEventListener("click", () => {
-      if (confirm("Ativar drain? Novos jobs ficam na fila até Resume.")) {
-        postAdmin("/api/v1/admin/drain", "Drain");
-      }
+    $("btn-drain").addEventListener("click", async () => {
+      const ok = await confirmAction({
+        kind: "warn",
+        kicker: "Admin",
+        title: "Ativar drain?",
+        body: "Novos jobs ficam na fila até você clicar em Resume. Jobs em andamento não são interrompidos.",
+        confirmLabel: "Ativar drain",
+      });
+      if (ok) postAdmin("/api/v1/admin/drain", "Drain");
     });
-    $("btn-resume").addEventListener("click", () => {
-      if (confirm("Desativar drain e voltar a aceitar jobs?")) {
-        postAdmin("/api/v1/admin/resume", "Resume");
-      }
+    $("btn-resume").addEventListener("click", async () => {
+      const ok = await confirmAction({
+        kind: "ok",
+        kicker: "Admin",
+        title: "Desativar drain?",
+        body: "O orchestrator volta a aceitar e provisionar jobs da fila.",
+        confirmLabel: "Resume",
+      });
+      if (ok) postAdmin("/api/v1/admin/resume", "Resume");
     });
-    $("btn-reconcile").addEventListener("click", () => {
-      if (confirm("Rodar reconcile agora (cleanup + reposição pool/warm)?")) {
-        postAdmin("/api/v1/admin/reconcile", "Reconcile");
-      }
+    $("btn-reconcile").addEventListener("click", async () => {
+      const ok = await confirmAction({
+        kind: "info",
+        kicker: "Admin",
+        title: "Rodar reconcile agora?",
+        body: "Executa cleanup de instances pendentes e repõe pool/warm conforme a policy.",
+        confirmLabel: "Reconcile",
+      });
+      if (ok) postAdmin("/api/v1/admin/reconcile", "Reconcile");
     });
-    $("btn-recycle-ready").addEventListener("click", () => {
-      if (
-        confirm(
-          "Reciclar pool/warm ready agora?\nSó funciona se não houver instances em provisioning/running.\nOs clones ready serão destruídos e repostos."
-        )
-      ) {
-        postAdmin("/api/v1/admin/recycle-ready", "Recycle ready");
-      }
+    $("btn-recycle-ready").addEventListener("click", async () => {
+      const ok = await confirmAction({
+        kind: "bad",
+        kicker: "Admin · destrutivo",
+        title: "Reciclar pool/warm ready?",
+        body: "Só funciona se não houver instances em provisioning/running.\n\nClones ready serão destruídos e repostos do template. Use após update de golden image ou cache.",
+        confirmLabel: "Reciclar ready",
+      });
+      if (ok) postAdmin("/api/v1/admin/recycle-ready", "Recycle ready");
     });
   }
 
+  setupConfirmModal();
   setupTabs();
   setupFilters();
   setupAdmin();

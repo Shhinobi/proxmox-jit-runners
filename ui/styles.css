@@ -102,6 +102,80 @@ h2 { margin: 0; font-size: 0.95rem; font-weight: 600; color: var(--muted); }
   padding: 0 0.2rem;
 }
 
+/* In-dashboard confirm dialog (replaces window.confirm) */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+}
+.modal.hidden { display: none; }
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 8, 16, 0.72);
+  backdrop-filter: blur(4px);
+}
+.modal-card {
+  position: relative;
+  width: min(440px, 100%);
+  background: linear-gradient(180deg, #152038 0%, var(--panel) 100%);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  animation: modal-in 140ms ease-out;
+}
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+.modal-accent {
+  height: 3px;
+  background: var(--accent);
+}
+.modal.kind-warn .modal-accent { background: var(--warn); }
+.modal.kind-bad .modal-accent { background: var(--bad); }
+.modal.kind-ok .modal-accent { background: var(--ok); }
+.modal-content { padding: 1.1rem 1.2rem 1.15rem; }
+.modal-kicker {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+.modal.kind-warn .modal-kicker { color: var(--warn); }
+.modal.kind-bad .modal-kicker { color: var(--bad); }
+.modal.kind-ok .modal-kicker { color: var(--ok); }
+.modal-title {
+  margin: 0 0 0.45rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+.modal-body {
+  margin: 0 0 1.15rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.modal-actions .btn { min-width: 6.5rem; }
+.modal.kind-warn #confirm-ok { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
+.modal.kind-bad #confirm-ok { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--border)); }
+.modal.kind-ok #confirm-ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+body.modal-open { overflow: hidden; }
+
 .alerts { display: grid; gap: 0.45rem; margin-bottom: 0.9rem; }
 .alert {
   border: 1px solid var(--border);
