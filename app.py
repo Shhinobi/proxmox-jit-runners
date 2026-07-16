@@ -211,16 +211,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/v1/admin/drain")
     async def admin_drain() -> dict[str, object]:
-        return set_drain(True)
+        result = set_drain(True)
+        return {
+            **result,
+            "action": "drain",
+            "message": "Drain enabled. New jobs stay queued until resume.",
+        }
 
     @app.post("/api/v1/admin/resume")
     async def admin_resume() -> dict[str, object]:
-        return set_drain(False)
+        result = set_drain(False)
+        return {
+            **result,
+            "action": "resume",
+            "message": "Drain cleared. Orchestrator accepts new jobs again.",
+        }
 
     @app.post("/api/v1/admin/reconcile")
     async def admin_reconcile() -> dict[str, object]:
+        before = await orchestrator.db.status_summary()
         await orchestrator.reconcile()
-        return {"ok": True, "drain": orchestrator.draining}
+        after = await orchestrator.db.status_summary()
+        return {
+            "ok": True,
+            "action": "reconcile",
+            "drain": orchestrator.draining,
+            "message": "Reconcile finished (cleanup, pool/warm replenishment).",
+            "before": before,
+            "after": after,
+        }
 
     ui_dir = ui_directory()
     if ui_dir.is_dir():
