@@ -88,6 +88,7 @@ h2 { margin: 0; font-size: 0.95rem; font-weight: 600; color: var(--muted); }
 .toast.ok { border-color: color-mix(in srgb, var(--ok) 50%, var(--border)); }
 .toast.warn { border-color: color-mix(in srgb, var(--warn) 50%, var(--border)); }
 .toast.bad { border-color: color-mix(in srgb, var(--bad) 50%, var(--border)); }
+.toast.info { border-color: color-mix(in srgb, var(--info) 50%, var(--border)); }
 .toast .toast-title { font-weight: 700; margin-bottom: 0.2rem; }
 .toast .toast-body { color: var(--muted); font-size: 0.84rem; font-family: var(--mono); white-space: pre-wrap; }
 .toast .toast-close {
@@ -249,6 +250,80 @@ a:hover { text-decoration: underline; }
   padding: 1.5rem;
   color: var(--muted);
   text-align: center;
+}
+
+.policy-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+}
+.policy-note {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin: 0 0 0.75rem;
+}
+.policy-editor {
+  display: grid;
+  gap: 0.75rem;
+}
+.policy-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 0.85rem 1rem;
+  display: grid;
+  gap: 0.65rem;
+}
+.policy-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.policy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.65rem;
+}
+.policy-grid label,
+.policy-checks {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.policy-grid input,
+.policy-grid select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  font: inherit;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.policy-checks .check-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 0.9rem;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text);
+  font-size: 0.84rem;
+}
+.policy-checks label.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text);
+  font-size: 0.84rem;
 }
 
 footer {

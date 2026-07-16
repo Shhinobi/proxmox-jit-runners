@@ -5,6 +5,14 @@
     lastSnapshot: null,
     toastTimer: null,
     actionInFlight: false,
+    policyDraft: null,
+    policyMeta: {
+      mode_options: ["ephemeral", "pool", "persistent"],
+      event_options: ["push", "workflow_dispatch", "schedule", "pull_request", "release"],
+      label_options: ["self-hosted", "proxmox-lxc", "crossbuild"],
+      installations: {},
+      broker_note: "",
+    },
   };
 
   const $ = (id) => document.getElementById(id);
@@ -200,29 +208,197 @@
     );
   }
 
-  function renderPolicies(policies) {
-    const repos = policies?.repositories || {};
+  function defaultPolicy(installationName) {
+    return {
+      github_installation: installationName || Object.keys(state.policyMeta.installations)[0] || "",
+      default_mode: "ephemeral",
+      warm_capacity: 0,
+      allowed_modes: ["ephemeral", "pool", "persistent"],
+      allowed_events: ["push", "workflow_dispatch", "schedule"],
+      required_labels: ["self-hosted", "proxmox-lxc", "crossbuild"],
+    };
+  }
+
+  function syncPolicyDraftFromServer(policies) {
+    state.policyMeta.installations = policies?.installations || {};
+    state.policyMeta.mode_options = policies?.mode_options || state.policyMeta.mode_options;
+    state.policyMeta.event_options = policies?.event_options || state.policyMeta.event_options;
+    state.policyMeta.label_options = policies?.label_options || state.policyMeta.label_options;
+    state.policyMeta.broker_note = policies?.broker_note || "";
+    // Keep local edits if the user is mid-edit; only bootstrap once.
+    if (!state.policyDraft) {
+      state.policyDraft = JSON.parse(JSON.stringify(policies?.repositories || {}));
+    }
     const list = $("repo-list");
-    list.innerHTML = Object.keys(repos)
+    list.innerHTML = Object.keys(policies?.repositories || {})
       .map((name) => `<option value="${escapeHtml(name)}"></option>`)
       .join("");
-    const rows = Object.entries(repos)
-      .map(
-        ([name, policy]) => `<tr>
-      <td class="mono">${escapeHtml(name)}</td>
-      <td>${escapeHtml(policy.default_mode)}</td>
-      <td>${escapeHtml(policy.warm_capacity)}</td>
-      <td class="mono">${escapeHtml((policy.allowed_modes || []).join(", "))}</td>
-      <td class="mono">${escapeHtml((policy.allowed_events || []).join(", "))}</td>
-      <td class="mono">${escapeHtml(policy.github_installation)}</td>
-    </tr>`
-      )
+    $("policy-note").textContent = state.policyMeta.broker_note || "";
+    renderPolicyEditor();
+  }
+
+  function collectPolicyDraftFromDom() {
+    const cards = [...document.querySelectorAll(".policy-card")];
+    const repositories = {};
+    for (const card of cards) {
+      const repo = card.querySelector('[data-field="repository"]').value.trim();
+      if (!repo) continue;
+      const modes = [...card.querySelectorAll('[data-field="allowed_modes"]:checked')].map((el) => el.value);
+      const events = [...card.querySelectorAll('[data-field="allowed_events"]:checked')].map((el) => el.value);
+      const labels = [...card.querySelectorAll('[data-field="required_labels"]:checked')].map((el) => el.value);
+      repositories[repo] = {
+        github_installation: card.querySelector('[data-field="github_installation"]').value,
+        default_mode: card.querySelector('[data-field="default_mode"]').value,
+        warm_capacity: Number(card.querySelector('[data-field="warm_capacity"]').value || 0),
+        allowed_modes: modes,
+        allowed_events: events,
+        required_labels: labels,
+      };
+    }
+    return repositories;
+  }
+
+  function renderPolicyEditor() {
+    const editor = $("policy-editor");
+    const draft = state.policyDraft || {};
+    const installationNames = Object.keys(state.policyMeta.installations);
+    const cards = Object.entries(draft)
+      .map(([repo, policy], index) => {
+        const modes = state.policyMeta.mode_options
+          .map(
+            (mode) =>
+              `<label class="inline"><input type="checkbox" data-field="allowed_modes" value="${escapeHtml(mode)}" ${(policy.allowed_modes || []).includes(mode) ? "checked" : ""}/> ${escapeHtml(mode)}</label>`
+          )
+          .join("");
+        const events = state.policyMeta.event_options
+          .map(
+            (event) =>
+              `<label class="inline"><input type="checkbox" data-field="allowed_events" value="${escapeHtml(event)}" ${(policy.allowed_events || []).includes(event) ? "checked" : ""}/> ${escapeHtml(event)}</label>`
+          )
+          .join("");
+        const labels = state.policyMeta.label_options
+          .map(
+            (label) =>
+              `<label class="inline"><input type="checkbox" data-field="required_labels" value="${escapeHtml(label)}" ${(policy.required_labels || []).includes(label) ? "checked" : ""}/> ${escapeHtml(label)}</label>`
+          )
+          .join("");
+        const installations = installationNames
+          .map(
+            (name) =>
+              `<option value="${escapeHtml(name)}" ${policy.github_installation === name ? "selected" : ""}>${escapeHtml(name)} (${escapeHtml(state.policyMeta.installations[name].account)})</option>`
+          )
+          .join("");
+        const modeOptions = state.policyMeta.mode_options
+          .map(
+            (mode) =>
+              `<option value="${escapeHtml(mode)}" ${policy.default_mode === mode ? "selected" : ""}>${escapeHtml(mode)}</option>`
+          )
+          .join("");
+        return `<article class="policy-card" data-index="${index}">
+          <div class="policy-card-head">
+            <strong class="mono">Policy #${index + 1}</strong>
+            <button type="button" class="btn ghost btn-policy-delete" data-repo="${escapeHtml(repo)}">Remove</button>
+          </div>
+          <div class="policy-grid">
+            <label>Repository
+              <input data-field="repository" value="${escapeHtml(repo)}" placeholder="Owner/Name" />
+            </label>
+            <label>Installation
+              <select data-field="github_installation">${installations}</select>
+            </label>
+            <label>Default mode
+              <select data-field="default_mode">${modeOptions}</select>
+            </label>
+            <label>Warm capacity
+              <input data-field="warm_capacity" type="number" min="0" step="1" value="${escapeHtml(policy.warm_capacity ?? 0)}" />
+            </label>
+          </div>
+          <div class="policy-checks">Allowed modes<div class="check-row">${modes}</div></div>
+          <div class="policy-checks">Allowed events<div class="check-row">${events}</div></div>
+          <div class="policy-checks">Required labels<div class="check-row">${labels}</div></div>
+        </article>`;
+      })
       .join("");
-    renderTable(
-      $("table-policies"),
-      ["Repository", "Default mode", "Warm", "Modes", "Events", "Installation"],
-      rows
-    );
+    editor.innerHTML = cards || `<div class="empty">Nenhuma policy configurada. Clique em Add repository.</div>`;
+    editor.querySelectorAll(".btn-policy-delete").forEach((button) => {
+      button.addEventListener("click", () => {
+        const card = button.closest(".policy-card");
+        const repoInput = card?.querySelector('[data-field="repository"]');
+        const repo = (repoInput?.value || button.getAttribute("data-repo") || "").trim();
+        if (!confirm(`Remover policy ${repo || "selecionada"}?`)) return;
+        card?.remove();
+        state.policyDraft = collectPolicyDraftFromDom();
+        renderPolicyEditor();
+      });
+    });
+  }
+
+  function setupPolicyEditor() {
+    $("btn-policy-add").addEventListener("click", () => {
+      state.policyDraft = collectPolicyDraftFromDom();
+      let name = "Owner/NewRepo";
+      let i = 1;
+      while (state.policyDraft[name]) {
+        name = `Owner/NewRepo-${i++}`;
+      }
+      state.policyDraft[name] = defaultPolicy();
+      renderPolicyEditor();
+    });
+    $("btn-policy-reset").addEventListener("click", () => {
+      const server = state.lastSnapshot?.policies?.repositories || {};
+      state.policyDraft = JSON.parse(JSON.stringify(server));
+      renderPolicyEditor();
+      showToast("info", "Policies reset", "Draft restaurado a partir do servidor.", 5000);
+    });
+    $("btn-policy-save").addEventListener("click", async () => {
+      const repositories = collectPolicyDraftFromDom();
+      if (!Object.keys(repositories).length) {
+        showToast("bad", "Policies inválidas", "Mantenha ao menos um repositório.", 8000);
+        return;
+      }
+      if (!confirm(`Salvar ${Object.keys(repositories).length} policy(ies) e aplicar agora?`)) return;
+      state.actionInFlight = true;
+      showToast("warn", "Saving policies…", "Validando e gravando config.yaml", 0);
+      try {
+        const response = await fetch("/api/v1/admin/policies", {
+          method: "PUT",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ repositories }),
+        });
+        const text = await response.text();
+        let body = {};
+        try {
+          body = text ? JSON.parse(text) : {};
+        } catch {
+          body = { detail: text };
+        }
+        if (!response.ok) throw new Error(body.detail || body.message || `HTTP ${response.status}`);
+        state.policyDraft = JSON.parse(JSON.stringify(body.policies?.repositories || repositories));
+        syncPolicyDraftFromServer(body.policies || { repositories: state.policyDraft });
+        showToast(
+          "ok",
+          "Policies salvas",
+          `${body.message || "OK"}\n${body.broker_note || ""}`,
+          15000
+        );
+        const snap = await fetch(`/api/v1/snapshot?${queryString()}`, {
+          headers: { Accept: "application/json" },
+        });
+        if (snap.ok) {
+          const snapshot = await snap.json();
+          // force policy draft sync from saved server state
+          state.policyDraft = null;
+          applySnapshot(snapshot);
+        }
+      } catch (error) {
+        showToast("bad", "Falha ao salvar policies", String(error.message || error), 15000);
+      } finally {
+        state.actionInFlight = false;
+      }
+    });
   }
 
   function renderMetrics(metrics) {
@@ -311,7 +487,17 @@
     renderInstances(snapshot.instances || []);
     renderJobs(snapshot.jobs || []);
     renderDeliveries(snapshot.deliveries || []);
-    renderPolicies(snapshot.policies || {});
+    // Do not clobber in-progress policy edits on every SSE tick.
+    if (!state.actionInFlight) {
+      if (!state.policyDraft) {
+        syncPolicyDraftFromServer(snapshot.policies || {});
+      } else {
+        // Keep meta/options fresh, preserve draft.
+        state.policyMeta.installations = snapshot.policies?.installations || state.policyMeta.installations;
+        state.policyMeta.broker_note = snapshot.policies?.broker_note || state.policyMeta.broker_note;
+        $("policy-note").textContent = state.policyMeta.broker_note || "";
+      }
+    }
     renderMetrics(snapshot.metrics || {});
     renderDurationChart(snapshot.job_durations || []);
     if (!state.actionInFlight) {
@@ -482,6 +668,7 @@
   setupTabs();
   setupFilters();
   setupAdmin();
+  setupPolicyEditor();
   connectSSE();
   window.addEventListener("resize", () => {
     if (state.lastSnapshot) renderDurationChart(state.lastSnapshot.job_durations || []);

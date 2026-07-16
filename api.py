@@ -6,7 +6,12 @@ from typing import Any
 
 from prometheus_client import REGISTRY
 
-from .config import Settings
+from .config import (
+    ConfigError,
+    Settings,
+    repository_policy_to_dict,
+    save_repository_policies,
+)
 from .service import DRAIN_MARKER, Orchestrator
 
 
@@ -22,17 +27,49 @@ def public_policies(settings: Settings) -> dict[str, Any]:
         for name, installation in settings.github.installations.items()
     }
     repositories = {
-        name: {
-            "github_installation": policy.github_installation,
-            "default_mode": policy.default_mode,
-            "warm_capacity": policy.warm_capacity,
-            "allowed_modes": list(policy.allowed_modes),
-            "allowed_events": list(policy.allowed_events),
-            "required_labels": list(policy.required_labels),
-        }
-        for name, policy in settings.repositories.items()
+        name: repository_policy_to_dict(policy) for name, policy in settings.repositories.items()
     }
-    return {"installations": installations, "repositories": repositories}
+    return {
+        "installations": installations,
+        "repositories": repositories,
+        "mode_options": ["ephemeral", "pool", "persistent"],
+        "event_options": [
+            "push",
+            "workflow_dispatch",
+            "schedule",
+            "pull_request",
+            "release",
+        ],
+        "label_options": ["self-hosted", "proxmox-lxc", "crossbuild"],
+        "broker_note": (
+            "Repository policy is applied immediately. New repos also need the broker "
+            "allowlist on pve02 (/etc/runner-broker-repositories) and GitHub App access."
+        ),
+    }
+
+
+def apply_repository_policies(
+    orchestrator: Orchestrator,
+    repositories: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate, persist, and hot-reload repository policies."""
+    try:
+        new_settings = save_repository_policies(repositories)
+    except ConfigError as exc:
+        raise ValueError(str(exc)) from exc
+    orchestrator.settings = new_settings
+    return {
+        "ok": True,
+        "action": "save-policies",
+        "message": (
+            f"Saved {len(new_settings.repositories)} repository policy(ies) and reloaded."
+        ),
+        "policies": public_policies(new_settings),
+        "broker_note": (
+            "If you added repositories, append OWNER/NAME to "
+            "/etc/runner-broker-repositories on pve02 and ensure the GitHub App is installed."
+        ),
+    }
 
 
 def metrics_summary() -> dict[str, Any]:
