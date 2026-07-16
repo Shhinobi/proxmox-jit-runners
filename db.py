@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS instances (
   job_id INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  last_used_at INTEGER
+  last_used_at INTEGER,
+  error TEXT
 );
 CREATE INDEX IF NOT EXISTS instances_status_idx ON instances(status, mode);
 """
@@ -83,6 +84,15 @@ class Database:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         async with self.connect() as db:
             await db.executescript(SCHEMA)
+            # Lightweight forward-compatible migrations for existing DBs.
+            columns = {
+                str(row[1])
+                for row in await (
+                    await db.execute("PRAGMA table_info(instances)")
+                ).fetchall()
+            }
+            if "error" not in columns:
+                await db.execute("ALTER TABLE instances ADD COLUMN error TEXT")
             await db.commit()
 
     async def record_delivery(
@@ -184,7 +194,7 @@ class Database:
             return int(cursor.lastrowid)
 
     async def update_instance(self, instance_id: int, status: str, **fields: Any) -> None:
-        allowed = {"repository", "job_id", "runner_name", "last_used_at", "mode"}
+        allowed = {"repository", "job_id", "runner_name", "last_used_at", "mode", "error"}
         invalid = set(fields) - allowed
         if invalid:
             raise ValueError(f"invalid instance fields: {sorted(invalid)}")
@@ -203,7 +213,7 @@ class Database:
         **fields: Any,
     ) -> bool:
         """Atomically update an instance only while it is in an expected state."""
-        allowed = {"repository", "job_id", "runner_name", "last_used_at", "mode"}
+        allowed = {"repository", "job_id", "runner_name", "last_used_at", "mode", "error"}
         invalid = set(fields) - allowed
         if invalid:
             raise ValueError(f"invalid instance fields: {sorted(invalid)}")
@@ -427,6 +437,7 @@ class Database:
             SELECT
               i.id, i.vmid, i.ip_address, i.repository, i.mode, i.runner_name,
               i.status, i.job_id, i.created_at, i.updated_at, i.last_used_at,
+              i.error,
               j.run_id AS job_run_id,
               j.repository AS job_repository
             FROM instances i
