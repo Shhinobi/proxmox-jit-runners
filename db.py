@@ -319,9 +319,6 @@ class Database:
             (repository, runner_name),
         )
 
-    async def list_instances(self) -> list[dict[str, Any]]:
-        return await self._fetchall("SELECT * FROM instances ORDER BY vmid")
-
     async def count_active(self) -> int:
         row = await self._fetchone(
             "SELECT COUNT(*) AS total FROM instances WHERE status IN ('provisioning','ready','reserved','running') AND mode != 'pool'"
@@ -350,50 +347,131 @@ class Database:
         instances = await self._fetchall("SELECT mode, status, COUNT(*) AS total FROM instances GROUP BY mode, status")
         return {"jobs": jobs, "instances": instances}
 
-    async def list_jobs(self, limit: int = 50, status: str | None = None) -> list[dict[str, Any]]:
+    async def list_jobs(
+        self,
+        limit: int = 50,
+        status: str | None = None,
+        repository: str | None = None,
+        mode: str | None = None,
+    ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 200))
+        clauses: list[str] = []
+        params: list[Any] = []
         if status:
-            rows = await self._fetchall(
-                """
-                SELECT job_id, delivery_id, run_id, repository, mode, labels_json, status,
-                       runner_name, instance_id, attempts, error, created_at, updated_at, completed_at
-                FROM jobs
-                WHERE status = ?
-                ORDER BY created_at DESC, job_id DESC
-                LIMIT ?
-                """,
-                (status, limit),
-            )
-        else:
-            rows = await self._fetchall(
-                """
-                SELECT job_id, delivery_id, run_id, repository, mode, labels_json, status,
-                       runner_name, instance_id, attempts, error, created_at, updated_at, completed_at
-                FROM jobs
-                ORDER BY created_at DESC, job_id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
+            clauses.append("status = ?")
+            params.append(status)
+        if repository:
+            clauses.append("LOWER(repository) = LOWER(?)")
+            params.append(repository)
+        if mode:
+            clauses.append("mode = ?")
+            params.append(mode)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = await self._fetchall(
+            f"""
+            SELECT job_id, delivery_id, run_id, repository, mode, labels_json, status,
+                   runner_name, instance_id, attempts, error, created_at, updated_at, completed_at
+            FROM jobs
+            {where}
+            ORDER BY created_at DESC, job_id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+        now = int(time.time())
         for row in rows:
             raw_labels = row.pop("labels_json", "[]")
             try:
                 row["labels"] = json.loads(raw_labels) if raw_labels else []
             except (TypeError, json.JSONDecodeError):
                 row["labels"] = []
+            repo = str(row.get("repository") or "")
+            run_id = row.get("run_id")
+            job_id = row.get("job_id")
+            if repo and run_id:
+                row["github_run_url"] = f"https://github.com/{repo}/actions/runs/{run_id}"
+                if job_id:
+                    row["github_job_url"] = (
+                        f"https://github.com/{repo}/actions/runs/{run_id}/job/{job_id}"
+                    )
+            created = row.get("created_at")
+            completed = row.get("completed_at")
+            if created is not None:
+                end = int(completed) if completed is not None else now
+                row["duration_seconds"] = max(0, end - int(created))
+            else:
+                row["duration_seconds"] = None
         return rows
 
-    async def list_deliveries(self, limit: int = 50) -> list[dict[str, Any]]:
-        limit = max(1, min(int(limit), 200))
+    async def list_instances(
+        self,
+        status: str | None = None,
+        repository: str | None = None,
+        mode: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if repository:
+            clauses.append("LOWER(repository) = LOWER(?)")
+            params.append(repository)
+        if mode:
+            clauses.append("mode = ?")
+            params.append(mode)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return await self._fetchall(
-            """
+            f"SELECT * FROM instances {where} ORDER BY vmid",
+            tuple(params),
+        )
+
+    async def list_deliveries(
+        self,
+        limit: int = 50,
+        reason: str | None = None,
+        accepted: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 200))
+        clauses: list[str] = []
+        params: list[Any] = []
+        if reason:
+            clauses.append("reason = ?")
+            params.append(reason)
+        if accepted is not None:
+            clauses.append("accepted = ?")
+            params.append(int(accepted))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        return await self._fetchall(
+            f"""
             SELECT delivery_id, event, action, accepted, reason, received_at
             FROM deliveries
+            {where}
             ORDER BY received_at DESC, delivery_id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+
+    async def recent_job_durations(self, limit: int = 30) -> list[dict[str, Any]]:
+        """Completed jobs with duration for dashboard charts."""
+        limit = max(1, min(int(limit), 100))
+        rows = await self._fetchall(
+            """
+            SELECT job_id, repository, mode, status, created_at, completed_at
+            FROM jobs
+            WHERE completed_at IS NOT NULL AND created_at IS NOT NULL
+            ORDER BY completed_at DESC
             LIMIT ?
             """,
             (limit,),
         )
+        for row in rows:
+            row["duration_seconds"] = max(0, int(row["completed_at"]) - int(row["created_at"]))
+        rows.reverse()  # chronological for charts
+        return rows
 
     async def _execute(self, sql: str, parameters: tuple[Any, ...] = ()) -> None:
         async with self.connect() as db:

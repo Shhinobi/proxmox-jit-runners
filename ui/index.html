@@ -10,12 +10,58 @@
   <header class="top">
     <div>
       <h1>Runner Orchestrator</h1>
-      <p class="sub">Proxmox JIT · estado ao vivo (somente leitura)</p>
+      <p class="sub">Proxmox JIT · live dashboard</p>
     </div>
-    <div class="badges" id="badges"></div>
+    <div class="header-right">
+      <div class="admin" id="admin">
+        <button type="button" id="btn-drain" class="btn warn">Drain</button>
+        <button type="button" id="btn-resume" class="btn ok">Resume</button>
+        <button type="button" id="btn-reconcile" class="btn">Reconcile</button>
+      </div>
+      <div class="badges" id="badges"></div>
+    </div>
   </header>
 
+  <section class="alerts" id="alerts"></section>
   <section class="cards" id="cards"></section>
+
+  <section class="filters panel-box">
+    <label>Repository
+      <input id="filter-repo" type="text" placeholder="owner/repo" list="repo-list" />
+      <datalist id="repo-list"></datalist>
+    </label>
+    <label>Status
+      <select id="filter-status">
+        <option value="">any</option>
+        <option>queued</option>
+        <option>provisioning</option>
+        <option>waiting_for_runner</option>
+        <option>running</option>
+        <option>completed</option>
+        <option>failed</option>
+        <option>rejected</option>
+      </select>
+    </label>
+    <label>Mode
+      <select id="filter-mode">
+        <option value="">any</option>
+        <option>ephemeral</option>
+        <option>pool</option>
+        <option>warm</option>
+        <option>persistent</option>
+      </select>
+    </label>
+    <button type="button" id="btn-apply-filters" class="btn">Apply filters</button>
+    <button type="button" id="btn-clear-filters" class="btn ghost">Clear</button>
+  </section>
+
+  <section class="panel-box chart-box">
+    <div class="chart-head">
+      <h2>Job duration (recent completed)</h2>
+      <div class="metrics-line" id="metrics-line"></div>
+    </div>
+    <canvas id="duration-chart" width="960" height="160" aria-label="Job durations chart"></canvas>
+  </section>
 
   <nav class="tabs" role="tablist">
     <button type="button" class="tab active" data-tab="instances">Instances</button>
@@ -40,8 +86,8 @@
   </main>
 
   <footer>
-    <span id="refresh-meta">carregando…</span>
-    <span>Auth na borda (Authelia) · API <code>/api/v1/*</code></span>
+    <span id="refresh-meta">connecting…</span>
+    <span>SSE live · Authelia on public host · API <code>/api/v1/*</code></span>
   </footer>
 
   <script src="/ui/app.js"></script>
