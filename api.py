@@ -74,8 +74,15 @@ async def apply_repository_policies(
     except ConfigError as exc:
         raise ValueError(str(exc)) from exc
     orchestrator.settings = new_settings
-    # GitHub client holds installation map indirectly via settings; tokens
-    # remain valid. Installation account/id changes take effect immediately.
+    # Retire orphan warms (e.g. after handle rename) and replenish under new names.
+    try:
+        await orchestrator.reconcile()
+    except Exception as exc:  # noqa: BLE001 — save already succeeded
+        orchestrator.log(
+            "warn",
+            "admin",
+            f"post-policy reconcile failed: {exc}",
+        )
     inst_count = len(new_settings.github.installations)
     return {
         "ok": True,
@@ -83,7 +90,7 @@ async def apply_repository_policies(
         "message": (
             f"Saved {len(new_settings.repositories)} repository policy(ies) and "
             f"{inst_count} installation(s), synced broker allowlist "
-            f"({broker_result}), and reloaded."
+            f"({broker_result}), reloaded, and reconciled warm pool."
         ),
         "policies": public_policies(new_settings),
         "broker_synced": True,
