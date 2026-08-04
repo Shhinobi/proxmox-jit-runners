@@ -117,7 +117,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/overview")
     async def api_overview() -> dict[str, object]:
-        return await build_overview(orchestrator, cfg)
+        return await build_overview(orchestrator, orchestrator.settings)
 
     @app.get("/api/v1/instances")
     async def api_instances(
@@ -152,7 +152,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/policies")
     async def api_policies() -> dict[str, object]:
-        return public_policies(cfg)
+        return public_policies(orchestrator.settings)
 
     @app.get("/api/v1/metrics-summary")
     async def api_metrics_summary() -> dict[str, object]:
@@ -184,7 +184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, object]:
         return await build_dashboard_snapshot(
             orchestrator,
-            cfg,
+            orchestrator.settings,
             job_limit=limit,
             status=status_filter,
             repository=repository,
@@ -206,7 +206,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     break
                 snapshot = await build_dashboard_snapshot(
                     orchestrator,
-                    cfg,
+                    orchestrator.settings,
                     job_limit=limit,
                     status=status_filter,
                     repository=repository,
@@ -287,11 +287,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         purge_orphan_cache = bool(
             body.get("purge_orphan_cache") if isinstance(body, dict) else False
         )
+        capacity = body.get("capacity") if isinstance(body, dict) else None
+        if capacity is not None and not isinstance(capacity, dict):
+            raise HTTPException(
+                status_code=400, detail="body.capacity must be an object when provided"
+            )
         try:
             result = await apply_repository_policies(
                 orchestrator,
                 repositories,
                 installations=installations,
+                capacity=capacity,
                 cache_renames=cache_renames,
                 purge_orphan_cache=purge_orphan_cache,
             )
@@ -363,7 +369,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     ui_dir = ui_directory()
-    asset_version = "20260716-7"
+    # Bump on every UI-facing change so browsers drop stale app.js/styles.css.
+    # Format: YYYYMMDD-N (manual) — deploy does not auto-hash assets.
+    asset_version = "20260720-1"
     if ui_dir.is_dir():
         @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
         async def root_redirect() -> RedirectResponse:
@@ -373,7 +381,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async def ui_redirect() -> RedirectResponse:
             return RedirectResponse(url="/ui/", status_code=307)
 
-        @app.get("/ui/", include_in_schema=False)
+        @app.api_route("/ui/", methods=["GET", "HEAD"], include_in_schema=False)
         async def ui_index() -> Response:
             html = (ui_dir / "index.html").read_text(encoding="utf-8")
             html = html.replace("styles.css", f"styles.css?v={asset_version}")

@@ -91,6 +91,15 @@ class CapacityConfig:
     max_job_seconds: int = 10800
     persistent_idle_seconds: int = 86400
     reconcile_seconds: int = 60
+    # Warm recycle-in-place limits (re-JIT without clone). Exceeding forces destroy.
+    warm_max_uses: int = 25
+    warm_max_age_seconds: int = 14400  # 4h
+    warm_destroy_on_failure: bool = True
+    warm_min_root_mib: int = 2048  # destroy if rootfs free space below this after clean
+
+
+# Fields the dashboard may edit at runtime (persisted in repositories-override.yaml).
+CAPACITY_RUNTIME_FIELDS = ("max_active", "pool_size")
 
 
 @dataclass(frozen=True)
@@ -154,6 +163,86 @@ def installation_to_dict(installation: GitHubInstallation) -> dict[str, Any]:
         "scope": installation.scope,
         "runner_group_id": int(installation.runner_group_id),
     }
+
+
+def capacity_runtime_to_dict(capacity: CapacityConfig) -> dict[str, int]:
+    """Dashboard-editable capacity knobs only."""
+    return {field: int(getattr(capacity, field)) for field in CAPACITY_RUNTIME_FIELDS}
+
+
+def parse_capacity_config(
+    raw: dict[str, Any] | None,
+    *,
+    base: CapacityConfig | None = None,
+) -> CapacityConfig:
+    """Parse capacity mapping, optionally layering onto an existing base config."""
+    seed = base or CapacityConfig()
+    if raw is None:
+        return seed
+    if not isinstance(raw, dict):
+        raise ConfigError("capacity must be a mapping")
+    values: dict[str, Any] = {
+        "max_active": int(seed.max_active),
+        "pool_size": int(seed.pool_size),
+        "ready_timeout_seconds": int(seed.ready_timeout_seconds),
+        "max_job_seconds": int(seed.max_job_seconds),
+        "persistent_idle_seconds": int(seed.persistent_idle_seconds),
+        "reconcile_seconds": int(seed.reconcile_seconds),
+        "warm_max_uses": int(seed.warm_max_uses),
+        "warm_max_age_seconds": int(seed.warm_max_age_seconds),
+        "warm_destroy_on_failure": bool(seed.warm_destroy_on_failure),
+        "warm_min_root_mib": int(seed.warm_min_root_mib),
+    }
+    int_keys = {
+        "max_active",
+        "pool_size",
+        "ready_timeout_seconds",
+        "max_job_seconds",
+        "persistent_idle_seconds",
+        "reconcile_seconds",
+        "warm_max_uses",
+        "warm_max_age_seconds",
+        "warm_min_root_mib",
+    }
+    for key in int_keys:
+        if key in raw and raw[key] is not None:
+            try:
+                values[key] = int(raw[key])
+            except (TypeError, ValueError) as exc:
+                raise ConfigError(f"capacity.{key} must be an integer") from exc
+    if "warm_destroy_on_failure" in raw and raw["warm_destroy_on_failure"] is not None:
+        values["warm_destroy_on_failure"] = bool(raw["warm_destroy_on_failure"])
+    if values["max_active"] < 1:
+        raise ConfigError("capacity.max_active must be >= 1")
+    if values["pool_size"] < 0:
+        raise ConfigError("capacity.pool_size must be >= 0")
+    if values["ready_timeout_seconds"] < 1:
+        raise ConfigError("capacity.ready_timeout_seconds must be >= 1")
+    if values["max_job_seconds"] < 1:
+        raise ConfigError("capacity.max_job_seconds must be >= 1")
+    if values["persistent_idle_seconds"] < 1:
+        raise ConfigError("capacity.persistent_idle_seconds must be >= 1")
+    if values["reconcile_seconds"] < 1:
+        raise ConfigError("capacity.reconcile_seconds must be >= 1")
+    if values["warm_max_uses"] < 1:
+        raise ConfigError("capacity.warm_max_uses must be >= 1")
+    if values["warm_max_age_seconds"] < 60:
+        raise ConfigError("capacity.warm_max_age_seconds must be >= 60")
+    if values["warm_min_root_mib"] < 256:
+        raise ConfigError("capacity.warm_min_root_mib must be >= 256")
+    return CapacityConfig(**values)
+
+
+def validate_capacity_vs_warm(
+    capacity: CapacityConfig, repositories: dict[str, RepositoryPolicy]
+) -> None:
+    """Ensure global max_active can hold the sum of per-repo warm targets."""
+    warm_target = sum(int(policy.warm_capacity) for policy in repositories.values())
+    if warm_target > capacity.max_active:
+        raise ConfigError(
+            f"capacity.max_active ({capacity.max_active}) must be >= sum of "
+            f"repository warm_capacity ({warm_target}); raise max_active or lower warm targets"
+        )
 
 
 def parse_github_installations(raw_installations: dict[str, Any]) -> dict[str, GitHubInstallation]:
@@ -241,20 +330,27 @@ def save_repository_policies(
     repositories: dict[str, Any],
     path: str | Path | None = None,
     installations: dict[str, Any] | None = None,
+    capacity: dict[str, Any] | None = None,
 ) -> Settings:
-    """Persist repository (+ optional installation) policies to override and reload."""
+    """Persist repository (+ optional installation/capacity) policies to override and reload."""
     cfg_path = config_path(path)
     base = _load_yaml(cfg_path)
     if "github" not in base or "installations" not in base["github"]:
         raise ConfigError("configuration is missing github.installations")
+    current = load_settings(cfg_path)
     if installations is None:
         # Keep current effective installations (base + existing override).
-        current = load_settings(cfg_path)
         parsed_installations = current.github.installations
     else:
         parsed_installations = parse_github_installations(installations)
     parsed = parse_repository_policies(repositories, parsed_installations)
-    payload = {
+    if capacity is None:
+        parsed_capacity = current.capacity
+    else:
+        parsed_capacity = parse_capacity_config(capacity, base=current.capacity)
+    validate_capacity_vs_warm(parsed_capacity, parsed)
+    payload: dict[str, Any] = {
+        "capacity": capacity_runtime_to_dict(parsed_capacity),
         "installations": {
             name: installation_to_dict(inst) for name, inst in parsed_installations.items()
         },
@@ -283,6 +379,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
     # Runtime dashboard edits land in a writable override next to the SQLite DB.
     db_hint = str(raw.get("database_path", "/var/lib/runner-orchestrator/state.db"))
     override = repositories_override_path(db_hint)
+    override_capacity: dict[str, Any] | None = None
     if override.is_file():
         override_raw = _load_yaml(override)
         if isinstance(override_raw, dict):
@@ -293,6 +390,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
                 if not isinstance(raw["github"], dict):
                     raw["github"] = {}
                 raw["github"]["installations"] = override_raw["installations"]
+            if isinstance(override_raw.get("capacity"), dict):
+                override_capacity = override_raw["capacity"]
     try:
         gh_raw = raw["github"]
         pve_raw = raw["proxmox"]
@@ -335,10 +434,12 @@ def load_settings(path: str | Path | None = None) -> Settings:
         ),
     )
     cache = CacheConfig(**raw.get("cache", {}))
-    capacity = CapacityConfig(**raw.get("capacity", {}))
+    base_capacity = parse_capacity_config(raw.get("capacity") if isinstance(raw.get("capacity"), dict) else {})
+    capacity = parse_capacity_config(override_capacity, base=base_capacity)
     if not github.installations:
         raise ConfigError("at least one GitHub installation is required")
     repositories = parse_repository_policies(raw.get("repositories", {}), github.installations)
+    validate_capacity_vs_warm(capacity, repositories)
     profiles = {name: RunnerProfile(**value) for name, value in raw.get("profiles", {"crossbuild-small": {}}).items()}
     if proxmox.vmid_start > proxmox.vmid_end or proxmox.ip_start > proxmox.ip_end:
         raise ConfigError("invalid Proxmox VMID or IP range")

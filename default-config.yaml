@@ -1,6 +1,6 @@
 database_path: /var/lib/runner-orchestrator/state.db
 log_level: INFO
-shadow_mode: false
+shadow_mode: true
 drain: false
 
 github:
@@ -10,8 +10,9 @@ github:
   api_url: https://api.github.com
   api_version: "2022-11-28"
   installations:
+    # Live override maps this key to the JustShinobi personal installation.
     metaldevops-personal:
-      account: MetalDevops
+      account: JustShinobi
       installation_id: 146433491
       scope: repository
       runner_group_id: 1
@@ -47,17 +48,24 @@ cache:
   mount_path: /cache
   max_usage_percent: 80
   quota_gb: 40
-  # Purge orphan cache dirs (not in allowlist) older than N days on reconcile.
-  # Set 0 to disable automatic GC; dashboard purge/gc still work.
-  gc_orphan_days: 7
+  # Automatic GC is disabled: every reconciliation would open an SSH broker
+  # session on the Proxmox host. Run GC from the dashboard during maintenance.
+  gc_orphan_days: 0
 
 capacity:
-  max_active: 2
+  # Global ceiling for non-idle-pool runners (warms + jobs). Must be >= sum of
+  # repository warm_capacity. Dashboard can raise this without redeploy.
+  max_active: 4
   pool_size: 1
   ready_timeout_seconds: 300
   max_job_seconds: 10800
   persistent_idle_seconds: 86400
   reconcile_seconds: 60
+  # Warm recycle-in-place (re-JIT without clone). Exceeding forces destroy+reclone.
+  warm_max_uses: 25
+  warm_max_age_seconds: 14400
+  warm_destroy_on_failure: true
+  warm_min_root_mib: 2048
 
 profiles:
   crossbuild-small:
@@ -67,10 +75,18 @@ profiles:
     rootfs_gb: 25
 
 repositories:
-  MetalDevops/NinjaCrawler:
+  JustShinobi/NinjaCrawler:
     github_installation: metaldevops-personal
     default_mode: ephemeral
     warm_capacity: 1
+    allowed_modes: [ephemeral, pool, persistent]
+    allowed_events: [push, workflow_dispatch, schedule]
+    required_labels: [self-hosted, proxmox-lxc, crossbuild]
+  JustShinobi/privacy-leak-go:
+    github_installation: metaldevops-personal
+    # Dedicated warm reserve (2); claim path is mode-ephemeral.
+    default_mode: ephemeral
+    warm_capacity: 2
     allowed_modes: [ephemeral, pool, persistent]
     allowed_events: [push, workflow_dispatch, schedule]
     required_labels: [self-hosted, proxmox-lxc, crossbuild]

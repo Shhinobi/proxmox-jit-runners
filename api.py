@@ -9,9 +9,12 @@ from prometheus_client import REGISTRY
 from .config import (
     ConfigError,
     Settings,
+    capacity_runtime_to_dict,
+    parse_capacity_config,
     parse_repository_policies,
     repository_policy_to_dict,
     save_repository_policies,
+    validate_capacity_vs_warm,
 )
 from .service import DRAIN_MARKER, Orchestrator
 
@@ -30,7 +33,9 @@ def public_policies(settings: Settings) -> dict[str, Any]:
     repositories = {
         name: repository_policy_to_dict(policy) for name, policy in settings.repositories.items()
     }
+    warm_target = sum(int(policy.warm_capacity) for policy in settings.repositories.values())
     return {
+        "capacity": capacity_runtime_to_dict(settings.capacity),
         "installations": installations,
         "repositories": repositories,
         "mode_options": ["ephemeral", "pool", "persistent"],
@@ -42,9 +47,11 @@ def public_policies(settings: Settings) -> dict[str, Any]:
             "release",
         ],
         "label_options": ["self-hosted", "proxmox-lxc", "crossbuild"],
+        "warm_target": warm_target,
         "broker_note": (
             "Saving policies updates the orchestrator immediately and syncs the broker "
-            "allowlist on pve02. GitHub App access must still include each repository."
+            "allowlist on pve02. Capacity max_active is global (all repos). "
+            "GitHub App access must still include each repository."
         ),
     }
 
@@ -53,6 +60,7 @@ async def apply_repository_policies(
     orchestrator: Orchestrator,
     repositories: dict[str, Any],
     installations: dict[str, Any] | None = None,
+    capacity: dict[str, Any] | None = None,
     *,
     cache_renames: list[dict[str, str]] | None = None,
     purge_orphan_cache: bool = False,
@@ -66,6 +74,13 @@ async def apply_repository_policies(
 
             effective_installations = parse_github_installations(installations)
         parsed = parse_repository_policies(repositories, effective_installations)
+        if capacity is None:
+            effective_capacity = orchestrator.settings.capacity
+        else:
+            effective_capacity = parse_capacity_config(
+                capacity, base=orchestrator.settings.capacity
+            )
+        validate_capacity_vs_warm(effective_capacity, parsed)
     except ConfigError as exc:
         raise ValueError(str(exc)) from exc
 
@@ -98,7 +113,9 @@ async def apply_repository_policies(
     broker_result = await orchestrator.broker.sync_allowlist(list(parsed.keys()))
     try:
         new_settings = save_repository_policies(
-            repositories, installations=installations
+            repositories,
+            installations=installations,
+            capacity=capacity_runtime_to_dict(effective_capacity),
         )
     except ConfigError as exc:
         raise ValueError(str(exc)) from exc
@@ -129,13 +146,16 @@ async def apply_repository_policies(
             f"post-policy reconcile failed: {exc}",
         )
     inst_count = len(new_settings.github.installations)
+    warm_target = sum(int(p.warm_capacity) for p in new_settings.repositories.values())
     return {
         "ok": True,
         "action": "save-policies",
         "message": (
-            f"Saved {len(new_settings.repositories)} repository policy(ies) and "
-            f"{inst_count} installation(s), synced broker allowlist "
-            f"({broker_result}), reloaded, and reconciled warm pool."
+            f"Saved {len(new_settings.repositories)} repository policy(ies), "
+            f"{inst_count} installation(s), capacity max_active="
+            f"{new_settings.capacity.max_active}/pool_size="
+            f"{new_settings.capacity.pool_size} (warm target={warm_target}), "
+            f"synced broker allowlist ({broker_result}), reloaded, and reconciled warm pool."
         ),
         "policies": public_policies(new_settings),
         "broker_synced": True,

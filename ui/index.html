@@ -166,6 +166,12 @@
         <span class="policy-status muted" id="policy-status" aria-live="polite"></span>
       </div>
       <p class="policy-note" id="policy-note"></p>
+      <h2 class="policy-section-title">Global capacity</h2>
+      <p class="policy-hint muted">
+        <code>max_active</code> é o teto global de runners ativos (warms + jobs em todos os repos).
+        Deve ser ≥ soma de <code>warm_capacity</code>. <code>pool_size</code> é a reserva de clones genéricos parados.
+      </p>
+      <div id="capacity-editor" class="policy-editor"></div>
       <h2 class="policy-section-title">GitHub installations</h2>
       <p class="policy-hint muted">Edite o <code>account</code> (handle/org), <code>installation_id</code> e scope. O repositório deve ter owner igual ao account.</p>
       <div id="install-editor" class="policy-editor"></div>

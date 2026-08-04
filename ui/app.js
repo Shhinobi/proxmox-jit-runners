@@ -10,6 +10,7 @@
     openLogIds: new Set(),
     policyDraft: null,
     installationDraft: null,
+    capacityDraft: { max_active: 2, pool_size: 1 },
     policiesHydrated: false,
     policiesDirty: false,
     policyMeta: {
@@ -18,6 +19,7 @@
       label_options: ["self-hosted", "proxmox-lxc", "crossbuild"],
       installations: {},
       broker_note: "",
+      warm_target: 0,
     },
   };
 
@@ -485,6 +487,15 @@
 
   /** Read current form values into state (source of truth before any re-render). */
   function pullPoliciesFromDom() {
+    const capacityRoot = $("capacity-editor");
+    const capacity = {
+      max_active: Number(
+        fieldValue(capacityRoot || document, "[data-field='max_active']", String(state.capacityDraft?.max_active ?? 2)) || 2
+      ),
+      pool_size: Number(
+        fieldValue(capacityRoot || document, "[data-field='pool_size']", String(state.capacityDraft?.pool_size ?? 1)) || 1
+      ),
+    };
     const installations = {};
     document.querySelectorAll("#install-editor .install-card").forEach((card) => {
       const key = fieldValue(card, "[data-field='install_key']").trim();
@@ -509,10 +520,18 @@
         required_labels: [...card.querySelectorAll("[data-field='required_labels']:checked")].map((el) => el.value),
       };
     });
+    state.capacityDraft = capacity;
     state.installationDraft = installations;
     state.policyDraft = repositories;
     state.policiesDirty = true;
-    return { installations, repositories };
+    return { capacity, installations, repositories };
+  }
+
+  function warmTargetFromRepos(repositories) {
+    return Object.values(repositories || {}).reduce(
+      (sum, policy) => sum + Number(policy?.warm_capacity || 0),
+      0
+    );
   }
 
   function applyPoliciesMeta(policies) {
@@ -522,6 +541,9 @@
     state.policyMeta.event_options = policies.event_options || state.policyMeta.event_options;
     state.policyMeta.label_options = policies.label_options || state.policyMeta.label_options;
     state.policyMeta.broker_note = policies.broker_note || state.policyMeta.broker_note || "";
+    if (policies.warm_target != null) {
+      state.policyMeta.warm_target = Number(policies.warm_target) || 0;
+    }
     const list = $("repo-list");
     if (list) {
       list.innerHTML = Object.keys(policies.repositories || {})
@@ -539,6 +561,11 @@
     if (state.policiesHydrated && !force) return;
     state.installationDraft = JSON.parse(JSON.stringify((policies && policies.installations) || {}));
     state.policyDraft = JSON.parse(JSON.stringify((policies && policies.repositories) || {}));
+    const cap = (policies && policies.capacity) || {};
+    state.capacityDraft = {
+      max_active: Number(cap.max_active ?? state.capacityDraft?.max_active ?? 2),
+      pool_size: Number(cap.pool_size ?? state.capacityDraft?.pool_size ?? 1),
+    };
     state.policiesHydrated = true;
     state.policiesDirty = false;
     const note = $("policy-note");
@@ -547,8 +574,40 @@
   }
 
   function renderPolicies() {
+    renderCapacityEditor();
     renderInstallationEditor();
     renderPolicyEditor();
+  }
+
+  function renderCapacityEditor() {
+    const editor = $("capacity-editor");
+    if (!editor) return;
+    const cap = state.capacityDraft || { max_active: 2, pool_size: 1 };
+    const warmTarget = warmTargetFromRepos(state.policyDraft || {});
+    const maxActive = Number(cap.max_active ?? 2);
+    const over = warmTarget > maxActive;
+    editor.innerHTML = `<article class="policy-card capacity-card">
+      <div class="policy-card-head">
+        <strong class="mono">Cluster capacity</strong>
+        <span class="muted mono" id="capacity-warm-hint">${
+          over
+            ? `⚠ warm target ${warmTarget} &gt; max_active ${maxActive}`
+            : `warm target ${warmTarget} / max_active ${maxActive}`
+        }</span>
+      </div>
+      <div class="policy-grid">
+        <label>Max active (global)
+          <input data-field="max_active" type="number" min="1" step="1" value="${escapeHtml(cap.max_active ?? 2)}" />
+        </label>
+        <label>Pool size (global)
+          <input data-field="pool_size" type="number" min="0" step="1" value="${escapeHtml(cap.pool_size ?? 1)}" />
+        </label>
+      </div>
+      <p class="policy-hint muted" style="margin:0">
+        Raise <code>max_active</code> before increasing per-repo warm capacity.
+        Ready pool clones do not count against max_active until claimed.
+      </p>
+    </article>`;
   }
 
   function renderInstallationEditor() {
@@ -841,10 +900,11 @@
       return;
     }
     const saveBtn = $("btn-policy-save");
+    let capacity;
     let installations;
     let repositories;
     try {
-      ({ installations, repositories } = pullPoliciesFromDom());
+      ({ capacity, installations, repositories } = pullPoliciesFromDom());
     } catch (error) {
       showToast("bad", "Falha ao ler o formulário", String(error.message || error), 12000);
       return;
@@ -857,16 +917,37 @@
       showToast("bad", "Policies inválidas", "Mantenha ao menos um repositório Owner/Name.", 10000);
       return;
     }
+    if (!Number.isFinite(capacity.max_active) || capacity.max_active < 1) {
+      showToast("bad", "Capacity inválida", "max_active deve ser um inteiro >= 1.", 10000);
+      return;
+    }
+    if (!Number.isFinite(capacity.pool_size) || capacity.pool_size < 0) {
+      showToast("bad", "Capacity inválida", "pool_size deve ser um inteiro >= 0.", 10000);
+      return;
+    }
+    const warmTarget = warmTargetFromRepos(repositories);
+    if (warmTarget > capacity.max_active) {
+      showToast(
+        "bad",
+        "Capacity insuficiente",
+        `max_active (${capacity.max_active}) deve ser >= soma de warm_capacity (${warmTarget}).`,
+        12000
+      );
+      return;
+    }
     const instNames = Object.keys(installations);
     const names = Object.keys(repositories);
+    const warmLines = names
+      .map((n) => `· ${n} warm=${repositories[n].warm_capacity ?? 0}`)
+      .join("\n");
     showToast("info", "Confirme o save", "Use o diálogo para aplicar.", 4000);
     const ok = await confirmAction({
       kind: "ok",
       kicker: "Policies",
       title: "Salvar e aplicar policies?",
-      body: `${instNames.length} installation(s):\n${instNames
+      body: `Capacity: max_active=${capacity.max_active}, pool_size=${capacity.pool_size} (warm target=${warmTarget})\n\n${instNames.length} installation(s):\n${instNames
         .map((n) => `· ${n} → ${installations[n].account} (id ${installations[n].installation_id})`)
-        .join("\n")}\n\n${names.length} repositório(s):\n${names.map((n) => `· ${n}`).join("\n")}\n\nGrava override e sincroniza broker.`,
+        .join("\n")}\n\n${names.length} repositório(s):\n${warmLines}\n\nGrava override e sincroniza broker.`,
       confirmLabel: "Salvar e aplicar",
       cancelLabel: "Cancelar",
     });
@@ -886,7 +967,7 @@
       const response = await fetch("/api/v1/admin/policies", {
         method: "PUT",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({ repositories, installations }),
+        body: JSON.stringify({ capacity, repositories, installations }),
       });
       const text = await response.text();
       let body = {};
@@ -896,7 +977,7 @@
         body = { detail: text };
       }
       if (!response.ok) throw new Error(formatApiError(body, response.status));
-      hydratePolicies(body.policies || { repositories, installations }, { force: true });
+      hydratePolicies(body.policies || { capacity, repositories, installations }, { force: true });
       const cacheNote =
         Array.isArray(body.cache_ops) && body.cache_ops.length
           ? `\ncache: ${body.cache_ops.join("; ")}`
