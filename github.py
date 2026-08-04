@@ -131,15 +131,25 @@ class GitHubClient:
         )
         return str(data["token"])
 
-    async def find_runner(
-        self, installation: GitHubInstallation, repository: str, name: str
-    ) -> dict[str, Any] | None:
+    async def list_runners(
+        self, installation: GitHubInstallation, repository: str
+    ) -> list[dict[str, Any]]:
         base = self._runner_base(installation, repository)
         data = await self.request(
             installation, "GET", f"{base}/actions/runners?per_page=100"
         )
+        runners = data.get("runners", [])
+        return [dict(r) for r in runners if isinstance(r, dict)]
+
+    async def find_runner(
+        self, installation: GitHubInstallation, repository: str, name: str
+    ) -> dict[str, Any] | None:
         return next(
-            (runner for runner in data.get("runners", []) if runner.get("name") == name),
+            (
+                runner
+                for runner in await self.list_runners(installation, repository)
+                if runner.get("name") == name
+            ),
             None,
         )
 
@@ -150,6 +160,19 @@ class GitHubClient:
         await self.request(
             installation, "DELETE", f"{base}/actions/runners/{runner_id}"
         )
+
+    async def try_delete_runner(
+        self, installation: GitHubInstallation, repository: str, runner_id: int
+    ) -> bool:
+        """Best-effort delete. Returns False if GitHub refuses (e.g. still busy)."""
+        try:
+            await self.delete_runner(installation, repository, runner_id)
+            return True
+        except GitHubError as exc:
+            msg = str(exc).lower()
+            if "422" in msg or "busy" in msg or "running a job" in msg:
+                return False
+            raise
 
     @staticmethod
     def runner_url(installation: GitHubInstallation, repository: str) -> str:

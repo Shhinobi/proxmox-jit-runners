@@ -49,6 +49,10 @@ class BrokerClient:
         payload = json.dumps(credential, separators=(",", ":")).encode("utf-8")
         await self._run(f"inject {vmid}", payload)
 
+    async def clean_work(self, vmid: int) -> str:
+        """Clear Actions job workdirs before re-JIT recycle on a warm CT."""
+        return await self._run(f"clean-work {vmid}")
+
     async def cache_ready(self, repository: str) -> bool:
         output = await self._run(f"cache-ready {repository}")
         return output == "ready"

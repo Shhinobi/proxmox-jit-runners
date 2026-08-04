@@ -93,6 +93,10 @@ class Database:
             }
             if "error" not in columns:
                 await db.execute("ALTER TABLE instances ADD COLUMN error TEXT")
+            if "use_count" not in columns:
+                await db.execute(
+                    "ALTER TABLE instances ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0"
+                )
             await db.commit()
 
     async def record_delivery(
@@ -157,15 +161,60 @@ class Database:
             result["labels"] = json.loads(result.pop("labels_json"))
             return result
 
-    async def set_job_status(self, job_id: int, status: str, **fields: Any) -> None:
+    # Terminal job states must not be overwritten by late webhooks/provision.
+    JOB_TERMINAL_STATUSES = frozenset({"completed", "failed", "rejected"})
+    # Allowed previous statuses when moving into each non-terminal status.
+    JOB_STATUS_FROM: dict[str, frozenset[str]] = {
+        # capacity/drain failures requeue from provisioning; never from terminal.
+        "queued": frozenset({"queued", "provisioning"}),
+        "provisioning": frozenset({"queued", "provisioning"}),
+        "waiting_for_runner": frozenset({"queued", "provisioning", "waiting_for_runner"}),
+        "running": frozenset({"queued", "provisioning", "waiting_for_runner", "running"}),
+        "completed": frozenset({
+            "queued",
+            "provisioning",
+            "waiting_for_runner",
+            "running",
+            "completed",
+        }),
+        "failed": frozenset({
+            "queued",
+            "provisioning",
+            "waiting_for_runner",
+            "running",
+            "failed",
+        }),
+        "rejected": frozenset({"queued", "rejected"}),
+    }
+
+    async def set_job_status(self, job_id: int, status: str, **fields: Any) -> bool:
+        """Update job status with monotonic lifecycle guards.
+
+        Returns True if a row was updated. Late in_progress/provision must not
+        revive a job that already completed/failed.
+        """
         allowed = {"mode", "runner_name", "instance_id", "error", "completed_at"}
         invalid = set(fields) - allowed
         if invalid:
             raise ValueError(f"invalid job fields: {sorted(invalid)}")
         fields["updated_at"] = int(time.time())
         assignments = ", ".join(f"{name}=?" for name in fields)
-        values = [*fields.values(), job_id]
-        await self._execute(f"UPDATE jobs SET status=?, {assignments} WHERE job_id=?", (status, *values))
+        allowed_from = self.JOB_STATUS_FROM.get(status)
+        async with self.connect() as db:
+            if allowed_from is None:
+                cursor = await db.execute(
+                    f"UPDATE jobs SET status=?, {assignments} WHERE job_id=?",
+                    (status, *fields.values(), job_id),
+                )
+            else:
+                placeholders = ",".join("?" for _ in allowed_from)
+                cursor = await db.execute(
+                    f"UPDATE jobs SET status=?, {assignments} "
+                    f"WHERE job_id=? AND status IN ({placeholders})",
+                    (status, *fields.values(), job_id, *allowed_from),
+                )
+            await db.commit()
+            return cursor.rowcount == 1
 
     async def get_job(self, job_id: int) -> dict[str, Any] | None:
         return await self._fetchone("SELECT * FROM jobs WHERE job_id=?", (job_id,))
@@ -194,7 +243,15 @@ class Database:
             return int(cursor.lastrowid)
 
     async def update_instance(self, instance_id: int, status: str, **fields: Any) -> None:
-        allowed = {"repository", "job_id", "runner_name", "last_used_at", "mode", "error"}
+        allowed = {
+            "repository",
+            "job_id",
+            "runner_name",
+            "last_used_at",
+            "mode",
+            "error",
+            "use_count",
+        }
         invalid = set(fields) - allowed
         if invalid:
             raise ValueError(f"invalid instance fields: {sorted(invalid)}")
@@ -213,7 +270,15 @@ class Database:
         **fields: Any,
     ) -> bool:
         """Atomically update an instance only while it is in an expected state."""
-        allowed = {"repository", "job_id", "runner_name", "last_used_at", "mode", "error"}
+        allowed = {
+            "repository",
+            "job_id",
+            "runner_name",
+            "last_used_at",
+            "mode",
+            "error",
+            "use_count",
+        }
         invalid = set(fields) - allowed
         if invalid:
             raise ValueError(f"invalid instance fields: {sorted(invalid)}")
@@ -311,6 +376,15 @@ class Database:
             """SELECT COUNT(*) AS total FROM instances
                WHERE mode='warm' AND LOWER(repository)=LOWER(?)
                  AND status IN ('provisioning','ready')""",
+            (repository,),
+        )
+        return int((row or {"total": 0})["total"])
+
+    async def count_warm_ready(self, repository: str) -> int:
+        row = await self._fetchone(
+            """SELECT COUNT(*) AS total FROM instances
+               WHERE mode='warm' AND LOWER(repository)=LOWER(?)
+                 AND status='ready'""",
             (repository,),
         )
         return int((row or {"total": 0})["total"])
