@@ -228,7 +228,7 @@ class Orchestrator:
                 by_job = await self.db.find_instance_by_job(job_id)
                 if by_job is not None:
                     bound_name = str(runner_name or "")
-                    expected_warm = f"pve-lxc-warm-{by_job['vmid']}"
+                    expected_warm = self._warm_runner_name(int(by_job["vmid"]))
                     if by_job["mode"] == "warm" and bound_name and bound_name != expected_warm:
                         self.log(
                             "warn",
@@ -254,7 +254,7 @@ class Orchestrator:
                         instance = by_job
             if instance:
                 bound_name = str(runner_name or instance.get("runner_name") or "")
-                expected_warm = f"pve-lxc-warm-{instance['vmid']}"
+                expected_warm = self._warm_runner_name(int(instance["vmid"]))
                 # Safety: refuse mismatched warm names even if found by runner lookup race.
                 if instance["mode"] == "warm" and bound_name and bound_name != expected_warm:
                     self.log(
@@ -568,6 +568,14 @@ class Orchestrator:
     @staticmethod
     def _runner_name(mode: str, job_id: int) -> str:
         return f"pve-lxc-{mode}-{job_id}"
+
+    @staticmethod
+    def _warm_runner_name(vmid: int) -> str:
+        return f"pve-lxc-warm-{vmid}"
+
+    @staticmethod
+    def _pool_runner_name(vmid: int) -> str:
+        return f"pve-lxc-pool-{vmid}"
 
     async def _complete_job(
         self,
@@ -1187,6 +1195,16 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001 — reconcile must continue
             self.log("warn", "cache", f"auto GC failed: {exc}", min_age_days=days)
 
+    async def _fail_and_retire(
+        self, instance: dict[str, Any], bound_job: Any, reason: str, *, now: int
+    ) -> None:
+        """Fail the bound job (if any) and schedule the running instance for teardown."""
+        if bound_job:
+            await self.db.set_job_status(int(bound_job), "failed", completed_at=now, error=reason)
+        await self.db.transition_instance(
+            instance["id"], {"running"}, "delete_pending", error=reason
+        )
+
     async def _reconcile_running_instance(
         self, instance: dict[str, Any], *, now: int, age: int
     ) -> None:
@@ -1201,7 +1219,7 @@ class Orchestrator:
 
         # Warm name must match VMID. Mismatch means a bad in_progress bind.
         if instance["mode"] == "warm" and runner_name:
-            expected = f"pve-lxc-warm-{vmid}"
+            expected = self._warm_runner_name(vmid)
             if runner_name != expected:
                 self.log(
                     "warn",
@@ -1212,18 +1230,8 @@ class Orchestrator:
                     expected=expected,
                     job_id=bound_job,
                 )
-                if bound_job:
-                    await self.db.set_job_status(
-                        int(bound_job),
-                        "failed",
-                        completed_at=now,
-                        error="runner_name_vmid_mismatch",
-                    )
-                await self.db.transition_instance(
-                    instance["id"],
-                    {"running"},
-                    "delete_pending",
-                    error="runner_name_vmid_mismatch",
+                await self._fail_and_retire(
+                    instance, bound_job, "runner_name_vmid_mismatch", now=now
                 )
                 return
 
@@ -1248,18 +1256,8 @@ class Orchestrator:
                     runner_name=runner_name or None,
                     job_id=bound_job,
                 )
-                if bound_job:
-                    await self.db.set_job_status(
-                        int(bound_job),
-                        "failed",
-                        completed_at=now,
-                        error="ct_missing_while_running",
-                    )
-                await self.db.transition_instance(
-                    instance["id"],
-                    {"running"},
-                    "delete_pending",
-                    error="ct_missing_while_running",
+                await self._fail_and_retire(
+                    instance, bound_job, "ct_missing_while_running", now=now
                 )
                 return
 
@@ -1294,19 +1292,7 @@ class Orchestrator:
                     runner_name=runner_name,
                     job_id=bound_job,
                 )
-                if bound_job:
-                    await self.db.set_job_status(
-                        int(bound_job),
-                        "failed",
-                        completed_at=now,
-                        error="zombie_offline_runner",
-                    )
-                await self.db.transition_instance(
-                    instance["id"],
-                    {"running"},
-                    "delete_pending",
-                    error="zombie_offline_runner",
-                )
+                await self._fail_and_retire(instance, bound_job, "zombie_offline_runner", now=now)
                 return
 
         if age > self.settings.capacity.max_job_seconds:
@@ -1397,7 +1383,7 @@ class Orchestrator:
                 try:
                     await self.proxmox.clone(
                         vmid,
-                        f"pve-lxc-pool-{vmid}",
+                        self._pool_runner_name(vmid),
                         ip_address,
                         # Pool CTs are pre-staged before any repo claims them,
                         # so there's no per-repo profile preference to use yet.
@@ -1486,7 +1472,7 @@ class Orchestrator:
             )
             return False
         instance_id, vmid, ip_address = reservation
-        runner_name = f"pve-lxc-warm-{vmid}"
+        runner_name = self._warm_runner_name(vmid)
         self.log(
             "info",
             "warm",
@@ -1670,7 +1656,7 @@ class Orchestrator:
             return
         vmid = int(instance["vmid"])
         repository = str(instance.get("repository") or "")
-        runner_name = str(instance.get("runner_name") or f"pve-lxc-warm-{vmid}")
+        runner_name = str(instance.get("runner_name") or self._warm_runner_name(vmid))
         if not repository:
             await self._fail_warm_recycle(
                 instance_id, "recycle_missing_repository", vmid=vmid, repository=repository
