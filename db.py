@@ -4,7 +4,7 @@ import json
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Collection
+from typing import Any, AsyncIterator, Awaitable, Callable, Collection
 
 import aiosqlite
 
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
   version INTEGER NOT NULL
 );
 INSERT INTO schema_version(version)
-SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_version);
+SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM schema_version);
 
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -65,6 +65,43 @@ CREATE INDEX IF NOT EXISTS instances_status_idx ON instances(status, mode);
 """
 
 
+async def _instance_columns(db: aiosqlite.Connection) -> set[str]:
+    return {
+        str(row[1]) for row in await (await db.execute("PRAGMA table_info(instances)")).fetchall()
+    }
+
+
+async def _migration_001_instances_error(db: aiosqlite.Connection) -> None:
+    """Safety net for databases older than `error` joining the base CREATE TABLE."""
+    if "error" not in await _instance_columns(db):
+        await db.execute("ALTER TABLE instances ADD COLUMN error TEXT")
+
+
+async def _migration_002_instances_use_count(db: aiosqlite.Connection) -> None:
+    if "use_count" not in await _instance_columns(db):
+        await db.execute(
+            "ALTER TABLE instances ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+async def _migration_003_instances_delete_attempts(db: aiosqlite.Connection) -> None:
+    if "delete_attempts" not in await _instance_columns(db):
+        await db.execute(
+            "ALTER TABLE instances ADD COLUMN delete_attempts INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+# Applied in order, once each, tracked by schema_version.version. Every
+# migration must stay idempotent (checks before it alters) since an existing
+# database's on-disk shape may already be ahead of what its stored version
+# claims — these ran unconditionally before schema_version was wired up.
+MIGRATIONS: tuple[Callable[[aiosqlite.Connection], Awaitable[None]], ...] = (
+    _migration_001_instances_error,
+    _migration_002_instances_use_count,
+    _migration_003_instances_delete_attempts,
+)
+
+
 class Database:
     def __init__(self, path: str):
         self.path = path
@@ -84,20 +121,15 @@ class Database:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         async with self.connect() as db:
             await db.executescript(SCHEMA)
-            # Lightweight forward-compatible migrations for existing DBs.
-            columns = {
-                str(row[1])
-                for row in await (
-                    await db.execute("PRAGMA table_info(instances)")
-                ).fetchall()
-            }
-            if "error" not in columns:
-                await db.execute("ALTER TABLE instances ADD COLUMN error TEXT")
-            if "use_count" not in columns:
-                await db.execute(
-                    "ALTER TABLE instances ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0"
-                )
             await db.commit()
+            row = await (await db.execute("SELECT version FROM schema_version")).fetchone()
+            current_version = int(row[0]) if row else 0
+            for index, migration in enumerate(MIGRATIONS, start=1):
+                if index <= current_version:
+                    continue
+                await migration(db)
+                await db.execute("UPDATE schema_version SET version=?", (index,))
+                await db.commit()
 
     async def record_delivery(
         self, delivery_id: str, event: str, action: str, accepted: bool, reason: str
@@ -251,6 +283,7 @@ class Database:
             "mode",
             "error",
             "use_count",
+            "delete_attempts",
         }
         invalid = set(fields) - allowed
         if invalid:
@@ -278,6 +311,7 @@ class Database:
             "mode",
             "error",
             "use_count",
+            "delete_attempts",
         }
         invalid = set(fields) - allowed
         if invalid:
@@ -389,6 +423,24 @@ class Database:
         )
         return int((row or {"total": 0})["total"])
 
+    async def list_ready_warm(self, repository: str) -> list[dict[str, Any]]:
+        """Ready (idle, safe to retire) warm instances for a repo, oldest first."""
+        return await self._fetchall(
+            """SELECT * FROM instances
+               WHERE mode='warm' AND LOWER(repository)=LOWER(?) AND status='ready'
+               ORDER BY created_at""",
+            (repository,),
+        )
+
+    async def last_job_activity(self, repository: str) -> int | None:
+        """Timestamp of the most recent job request for this repo, any mode/outcome."""
+        row = await self._fetchone(
+            "SELECT MAX(created_at) AS latest FROM jobs WHERE LOWER(repository)=LOWER(?)",
+            (repository,),
+        )
+        latest = (row or {}).get("latest")
+        return int(latest) if latest is not None else None
+
     async def rebind_warm_repository(self, from_repository: str, to_repository: str) -> int:
         """Point warm instances at a renamed policy repository (exact match)."""
         if from_repository == to_repository:
@@ -434,6 +486,20 @@ class Database:
             "SELECT COUNT(*) AS total FROM instances WHERE status IN ('provisioning','running') AND mode = 'pool'"
         )
         return int((row or {"total": 0})["total"]) + int((pool_running or {"total": 0})["total"])
+
+    async def count_active_for_repo(self, repository: str) -> int:
+        """Mirrors count_active() but scoped to one repository's non-pool instances.
+
+        Pool instances are generic/unclaimed at this point (no repository yet),
+        so they're excluded the same way count_active() excludes idle ones.
+        """
+        row = await self._fetchone(
+            """SELECT COUNT(*) AS total FROM instances
+               WHERE status IN ('provisioning','ready','reserved','running')
+                 AND mode != 'pool' AND LOWER(repository) = LOWER(?)""",
+            (repository,),
+        )
+        return int((row or {"total": 0})["total"])
 
     async def count_ready_pool(self) -> int:
         row = await self._fetchone("SELECT COUNT(*) AS total FROM instances WHERE mode='pool' AND status='ready'")
@@ -534,7 +600,7 @@ class Database:
             SELECT
               i.id, i.vmid, i.ip_address, i.repository, i.mode, i.runner_name,
               i.status, i.job_id, i.created_at, i.updated_at, i.last_used_at,
-              i.error,
+              i.error, i.delete_attempts,
               j.run_id AS job_run_id,
               j.repository AS job_repository
             FROM instances i
@@ -605,13 +671,16 @@ class Database:
     async def schedule_ready_recycle(self) -> dict[str, Any]:
         """Mark ready pool/warm instances for deletion so reconcile can rebuild them.
 
-        Refuses when any non-ready instance exists (busy provision/run path).
+        Refuses when a pool/warm instance is not ready (busy provision/run
+        path) — those are the only rows this recycles, so a busy ephemeral or
+        persistent instance elsewhere in the fleet must not block it.
         """
         async with self.connect() as db:
             await db.execute("BEGIN IMMEDIATE")
             busy = await (
                 await db.execute(
-                    "SELECT vmid, mode, status FROM instances WHERE status NOT IN ('ready')"
+                    """SELECT vmid, mode, status FROM instances
+                       WHERE status != 'ready' AND mode IN ('pool', 'warm')"""
                 )
             ).fetchall()
             if busy:

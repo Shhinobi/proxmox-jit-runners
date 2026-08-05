@@ -46,8 +46,9 @@ broker:
 cache:
   root: /srv/runner-cache
   mount_path: /cache
-  max_usage_percent: 80
-  quota_gb: 40
+  # Usage/quota (80% / 40GiB per repo) is enforced on pve02 by
+  # runner-ct-broker.sh (RUNNER_CACHE_MAX_PERCENT / RUNNER_CACHE_QUOTA_GB),
+  # not by the orchestrator — there's no field here for it.
   # Automatic GC is disabled: every reconciliation would open an SSH broker
   # session on the Proxmox host. Run GC from the dashboard during maintenance.
   gc_orphan_days: 0
@@ -79,6 +80,11 @@ repositories:
     github_installation: metaldevops-personal
     default_mode: ephemeral
     warm_capacity: 1
+    # Elastic warm pool (opt-in, disabled by default): scale warm_capacity
+    # down to warm_idle_capacity after warm_idle_after_seconds with no job
+    # request for this repo, then back up to warm_capacity on the next one.
+    # warm_idle_capacity: 0
+    # warm_idle_after_seconds: 21600
     allowed_modes: [ephemeral, pool, persistent]
     allowed_events: [push, workflow_dispatch, schedule]
     required_labels: [self-hosted, proxmox-lxc, crossbuild]

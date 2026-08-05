@@ -9,7 +9,7 @@ from typing import Any
 from prometheus_client import Counter, Gauge, Histogram
 
 from .broker import BrokerClient
-from .config import GitHubInstallation, RepositoryPolicy, Settings
+from .config import DEFAULT_PROFILE_NAME, GitHubInstallation, RepositoryPolicy, Settings
 from .db import Database
 from .eventlog import EventLog
 from .github import GitHubClient
@@ -20,9 +20,21 @@ from .telemetry import span
 LOGGER = logging.getLogger("runner_orchestrator")
 DRAIN_MARKER = Path("/var/lib/runner-orchestrator/drain")
 
+
+def _events_persist_path(database_path: str) -> Path | None:
+    """Sibling file next to the SQLite DB; None for :memory: (nothing to survive)."""
+    if database_path == ":memory:":
+        return None
+    return Path(database_path).resolve().parent / "events.jsonl"
+
 WEBHOOKS = Counter("runner_orchestrator_webhooks_total", "Webhook deliveries", ["result", "reason"])
 PROVISION = Histogram("runner_orchestrator_provision_seconds", "Runner provisioning duration", ["mode"])
 PROVISION_FAILURES = Counter("runner_orchestrator_provision_failures_total", "Provisioning failures", ["mode"])
+JOBS_FAILED = Counter(
+    "runner_orchestrator_jobs_failed_total",
+    "Jobs that exhausted retries and landed in terminal status=failed",
+    ["mode"],
+)
 CLEANUP_FAILURES = Counter("runner_orchestrator_cleanup_failures_total", "Cleanup failures", ["mode"])
 ACTIVE = Gauge("runner_orchestrator_active_instances", "Active runner instances", ["mode", "status"])
 QUEUE = Gauge("runner_orchestrator_queue_depth", "Queued jobs")
@@ -79,7 +91,7 @@ class Orchestrator:
         self.github = github
         self.proxmox = proxmox
         self.broker = broker
-        self.events = EventLog(maxlen=500)
+        self.events = EventLog(maxlen=500, persist_path=_events_persist_path(database.path))
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -375,6 +387,23 @@ class Orchestrator:
                 await asyncio.sleep(5)
                 return
 
+            if policy is not None and policy.max_concurrent > 0:
+                repo_active = await self.db.count_active_for_repo(decision.repository)
+                if repo_active >= policy.max_concurrent:
+                    await self.db.set_job_status(job_id, "queued", error="repo_capacity_exhausted")
+                    self.log(
+                        "warn",
+                        "job",
+                        "repository capacity exhausted; requeue",
+                        job_id=job_id,
+                        repository=decision.repository,
+                        mode=mode,
+                        active=repo_active,
+                        max_concurrent=policy.max_concurrent,
+                    )
+                    await asyncio.sleep(5)
+                    return
+
             await self._provision(job, decision)
         except Exception as exc:
             PROVISION_FAILURES.labels(mode).inc()
@@ -390,10 +419,16 @@ class Orchestrator:
             instance = await self.db.find_instance_by_job(job_id)
             if instance:
                 await self._destroy_instance(instance)
-            if int(job["attempts"]) < 3:
+            attempts = int(job["attempts"])
+            if attempts < 3:
                 await self.db.set_job_status(job_id, "queued", error=str(exc)[:500])
+                # Back off before the worker loop can claim this job again, so a
+                # systemic outage (e.g. Proxmox/GitHub down) doesn't burn all 3
+                # attempts almost instantly.
+                await asyncio.sleep(min(5 * attempts, 30))
             else:
                 await self.db.set_job_status(job_id, "failed", error=str(exc)[:500])
+                JOBS_FAILED.labels(mode).inc()
 
     async def _provision(self, job: dict[str, Any], decision: Decision) -> None:
         started = time.monotonic()
@@ -401,7 +436,9 @@ class Orchestrator:
         repository = decision.repository
         installation = self._installation(repository)
         mode = decision.mode
-        profile = self.settings.profiles["crossbuild-small"]
+        resolved_policy = repository_policy(self.settings, repository)
+        profile_name = resolved_policy[1].profile if resolved_policy else DEFAULT_PROFILE_NAME
+        profile = self.settings.profiles[profile_name]
 
         instance: dict[str, Any] | None = None
         runner_name = self._runner_name(mode, job_id)
@@ -613,6 +650,15 @@ class Orchestrator:
             return False, f"age_seconds={age}>{cap.warm_max_age_seconds}"
         return True, "ok"
 
+    @staticmethod
+    def _destroy_retry_backoff(attempts: int) -> int:
+        """Seconds to wait since the last failed destroy before retrying again.
+
+        Exponential, capped at 1h, so a persistently-failing CT doesn't get
+        hammered against Proxmox/GitHub on every 60s reconcile pass.
+        """
+        return min(60 * (2**attempts), 3600)
+
     async def _destroy_instance(self, instance: dict[str, Any]) -> None:
         with span(
             "runner.instance.destroy",
@@ -694,6 +740,7 @@ class Orchestrator:
                                     {str(instance["status"])},
                                     "delete_failed",
                                     error="github_runner_delete_failed_still_online",
+                                    delete_attempts=int(instance.get("delete_attempts") or 0) + 1,
                                 )
                                 return
                             registration_purged = True
@@ -740,11 +787,13 @@ class Orchestrator:
             )
         except Exception as exc:
             CLEANUP_FAILURES.labels(str(instance["mode"])).inc()
+            attempts = int(instance.get("delete_attempts") or 0) + 1
             await self.db.transition_instance(
                 instance["id"],
                 {"deleting"},
                 "delete_failed",
                 error=str(exc)[:500],
+                delete_attempts=attempts,
             )
             self.events.exception(
                 "destroy",
@@ -1074,7 +1123,11 @@ class Orchestrator:
         for instance in instances:
             age = now - int(instance["updated_at"])
             idle = now - int(instance.get("last_used_at") or instance["updated_at"])
-            if instance["status"] in {"delete_pending", "delete_failed"}:
+            if instance["status"] == "delete_pending":
+                await self._destroy_instance(instance)
+            elif instance["status"] == "delete_failed" and age >= self._destroy_retry_backoff(
+                int(instance.get("delete_attempts") or 0)
+            ):
                 await self._destroy_instance(instance)
             elif instance["status"] == "provisioning" and age > self.settings.capacity.ready_timeout_seconds:
                 await self._destroy_instance(instance)
@@ -1312,8 +1365,12 @@ class Orchestrator:
         async with self._pool_lock:
             missing = self.settings.capacity.pool_size - await self.db.count_ready_pool()
             for _ in range(max(0, missing)):
+                # validate_capacity_budget already guarantees pool_size fits under
+                # max_active at config time; this is defense-in-depth against a
+                # runtime spike in active ephemeral/warm usage piling pool clones
+                # on top of an already-saturated host.
                 reservation = await self._reserve_instance(
-                    "pool", None, None, None, enforce_capacity=False
+                    "pool", None, None, None, enforce_capacity=True
                 )
                 if reservation is None:
                     return
@@ -1323,7 +1380,9 @@ class Orchestrator:
                         vmid,
                         f"pve-lxc-pool-{vmid}",
                         ip_address,
-                        self.settings.profiles["crossbuild-small"],
+                        # Pool CTs are pre-staged before any repo claims them,
+                        # so there's no per-repo profile preference to use yet.
+                        self.settings.profiles[DEFAULT_PROFILE_NAME],
                         "pool",
                         None,
                     )
@@ -1336,11 +1395,49 @@ class Orchestrator:
     async def _replenish_warm_pool(self) -> None:
         async with self._warm_lock:
             for repository, policy in self.settings.repositories.items():
-                missing = policy.warm_capacity - await self.db.count_warm_supply(repository)
+                target = await self._warm_target(repository, policy)
+                await self._scale_down_idle_warm(repository, target)
+                missing = target - await self.db.count_warm_supply(repository)
                 for _ in range(max(0, missing)):
                     created = await self._create_warm_runner(repository, policy)
                     if not created:
                         return
+
+    async def _warm_target(self, repository: str, policy: RepositoryPolicy) -> int:
+        """warm_capacity normally; scaled down to warm_idle_capacity once the
+        repo has gone warm_idle_after_seconds without a job request."""
+        if policy.warm_idle_capacity < 0:
+            return policy.warm_capacity
+        last_activity = await self.db.last_job_activity(repository)
+        if last_activity is None:
+            # No activity recorded yet (e.g. fresh install) — nothing to prove
+            # idleness against, so start at the configured steady-state target.
+            return policy.warm_capacity
+        idle_seconds = int(time.time()) - last_activity
+        if idle_seconds >= policy.warm_idle_after_seconds:
+            return policy.warm_idle_capacity
+        return policy.warm_capacity
+
+    async def _scale_down_idle_warm(self, repository: str, target: int) -> None:
+        """Retire ready (idle) warm CTs down to target; reconcile()/_destroy_instance
+        takes it from delete_pending, including the existing GitHub online/busy
+        safety check — no new teardown logic needed here."""
+        excess = await self.db.count_warm_supply(repository) - target
+        if excess <= 0:
+            return
+        for instance in (await self.db.list_ready_warm(repository))[:excess]:
+            transitioned = await self.db.transition_instance(
+                int(instance["id"]), {"ready"}, "delete_pending"
+            )
+            if transitioned:
+                self.log(
+                    "info",
+                    "warm",
+                    f"scaling down idle warm {instance.get('runner_name')} "
+                    f"(target={target})",
+                    vmid=instance.get("vmid"),
+                    repository=repository,
+                )
 
     async def _create_warm_runner(
         self, repository: str, policy: RepositoryPolicy
@@ -1386,7 +1483,7 @@ class Orchestrator:
             instance_id, "provisioning", runner_name=runner_name, error=None
         )
         try:
-            profile = self.settings.profiles["crossbuild-small"]
+            profile = self.settings.profiles[policy.profile]
             await self.proxmox.clone(
                 vmid, runner_name, ip_address, profile, "warm", None
             )

@@ -2,20 +2,90 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import traceback
 from collections import deque
+from pathlib import Path
 from typing import Any
+
+# Compact the on-disk mirror back down to maxlen every N appends, so it
+# doesn't grow unbounded between restarts while still staying append-only
+# (cheap) most of the time.
+_COMPACT_EVERY = 50
 
 
 class EventLog:
-    """Thread-safe ring buffer of structured operational events."""
+    """Thread-safe ring buffer of structured operational events.
 
-    def __init__(self, maxlen: int = 500):
+    Optionally mirrors each event to a JSONL file so the operator-facing
+    "what just happened" narrative survives a process restart — the deque
+    alone is wiped on every deploy/crash-restart, while the deliveries/jobs
+    tables in SQLite persist but are much terser.
+    """
+
+    def __init__(self, maxlen: int = 500, persist_path: str | Path | None = None):
         self._events: deque[dict[str, Any]] = deque(maxlen=max(1, int(maxlen)))
         self._lock = threading.Lock()
         self._seq = 0
+        self._persist_path = Path(persist_path) if persist_path else None
+        self._appends_since_compact = 0
+        if self._persist_path is not None:
+            self._load_persisted()
+
+    def _load_persisted(self) -> None:
+        path = self._persist_path
+        assert path is not None
+        if not path.is_file():
+            return
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return
+        maxlen = self._events.maxlen or 500
+        for line in lines[-maxlen:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            self._events.append(event)
+            self._seq = max(self._seq, int(event.get("id") or 0))
+
+    def _persist_locked(self, event: dict[str, Any]) -> None:
+        """Append (and periodically compact) the on-disk mirror.
+
+        Caller must already hold self._lock. Best-effort: disk trouble here
+        must never break the in-memory log itself.
+        """
+        path = self._persist_path
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+            self._appends_since_compact += 1
+            if self._appends_since_compact >= _COMPACT_EVERY:
+                self._compact_locked()
+        except OSError:
+            pass
+
+    def _compact_locked(self) -> None:
+        path = self._persist_path
+        if path is None:
+            return
+        try:
+            lines = "\n".join(json.dumps(e, separators=(",", ":")) for e in self._events)
+            path.write_text(lines + ("\n" if lines else ""), encoding="utf-8")
+            self._appends_since_compact = 0
+        except OSError:
+            pass
 
     def emit(
         self,
@@ -46,6 +116,7 @@ class EventLog:
                 "context": clean_context,
             }
             self._events.append(event)
+            self._persist_locked(event)
             return event
 
     def exception(

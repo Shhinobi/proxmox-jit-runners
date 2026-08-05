@@ -14,7 +14,8 @@ from .config import (
     parse_repository_policies,
     repository_policy_to_dict,
     save_repository_policies,
-    validate_capacity_vs_warm,
+    validate_capacity_budget,
+    validate_repository_profiles,
 )
 from .service import DRAIN_MARKER, Orchestrator
 
@@ -33,11 +34,21 @@ def public_policies(settings: Settings) -> dict[str, Any]:
     repositories = {
         name: repository_policy_to_dict(policy) for name, policy in settings.repositories.items()
     }
+    profiles = {
+        name: {
+            "cores": profile.cores,
+            "memory_mb": profile.memory_mb,
+            "swap_mb": profile.swap_mb,
+            "rootfs_gb": profile.rootfs_gb,
+        }
+        for name, profile in settings.profiles.items()
+    }
     warm_target = sum(int(policy.warm_capacity) for policy in settings.repositories.values())
     return {
         "capacity": capacity_runtime_to_dict(settings.capacity),
         "installations": installations,
         "repositories": repositories,
+        "profiles": profiles,
         "mode_options": ["ephemeral", "pool", "persistent"],
         "event_options": [
             "push",
@@ -50,8 +61,9 @@ def public_policies(settings: Settings) -> dict[str, Any]:
         "warm_target": warm_target,
         "broker_note": (
             "Saving policies updates the orchestrator immediately and syncs the broker "
-            "allowlist on pve02. Capacity max_active is global (all repos). "
-            "GitHub App access must still include each repository."
+            "allowlist on pve02. Capacity max_active is global and must cover "
+            "sum(warm_capacity) + pool_size. GitHub App access must still include each "
+            "repository."
         ),
     }
 
@@ -80,7 +92,8 @@ async def apply_repository_policies(
             effective_capacity = parse_capacity_config(
                 capacity, base=orchestrator.settings.capacity
             )
-        validate_capacity_vs_warm(effective_capacity, parsed)
+        validate_capacity_budget(effective_capacity, parsed)
+        validate_repository_profiles(parsed, orchestrator.settings.profiles)
     except ConfigError as exc:
         raise ValueError(str(exc)) from exc
 
