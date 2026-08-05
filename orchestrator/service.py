@@ -1489,7 +1489,6 @@ class Orchestrator:
             await self.proxmox.clone(vmid, runner_name, ip_address, profile, "warm", None)
             await self.broker.attach_cache(vmid, cache_slug(repository))
             installation = self._installation(repository)
-            labels = self._warm_labels(policy)
             # Stale GitHub runner registrations (e.g. after failed destroy) cause
             # generate-jitconfig 409 Already exists. Remove offline/idle leftovers.
             stale = await self.github.find_runner(installation, repository, runner_name)
@@ -1505,44 +1504,17 @@ class Orchestrator:
                     runner_id=stale.get("id"),
                     repository=repository,
                 )
-            jit = await self.github.generate_jit(installation, repository, runner_name, labels)
-            credential: dict[str, object] = {
-                "mode": "warm",
-                "runner_name": runner_name,
-                "repository": repository,
-                "labels": labels,
-                "runner_url": self.github.runner_url(installation, repository),
-                "encoded_jit_config": str(jit["encoded_jit_config"]),
-                "environment": runner_job_environment(
-                    cargo_target_dir=(
-                        f"/cache/target/{cache_slug(repository).replace('/', '-').lower()}-warm"
-                    ),
-                ),
-            }
+            credential = await self._build_warm_credential(
+                installation, repository, runner_name, policy
+            )
             await self.proxmox.start(vmid)
             await self.broker.inject(vmid, credential)
             outcome = await self._wait_for_warm_runner(
                 installation, repository, runner_name, instance_id
             )
-            target_status = "ready" if outcome == "ready" else "running"
-            transitioned = await self.db.transition_instance(
-                instance_id,
-                {"provisioning"},
-                target_status,
-                last_used_at=int(time.time()),
-                error=None,
+            target_status = await self._finalize_warm_transition(
+                instance_id, runner_name, outcome, clear_job=False
             )
-            if not transitioned:
-                current = await self.db.get_instance(instance_id)
-                if current is None or current["status"] not in {
-                    "ready",
-                    "reserved",
-                    "running",
-                    "delete_pending",
-                }:
-                    raise RuntimeError(
-                        f"warm runner {runner_name} changed to unexpected state: {current}"
-                    )
             WARM_REGISTRATION.labels(outcome).inc()
             PROVISION.labels("warm").observe(time.monotonic() - started)
             self.log(
@@ -1584,6 +1556,64 @@ class Orchestrator:
                 error=str(exc)[:300],
             )
             return True
+
+    async def _build_warm_credential(
+        self,
+        installation: GitHubInstallation,
+        repository: str,
+        runner_name: str,
+        policy: RepositoryPolicy,
+    ) -> dict[str, object]:
+        """JIT-register `runner_name` and build its injectable credential payload.
+
+        Shared by _create_warm_runner (fresh clone) and _recycle_warm_instance
+        (re-JIT in place) — identical from here on regardless of how the CT
+        itself got to a running state.
+        """
+        labels = self._warm_labels(policy)
+        jit = await self.github.generate_jit(installation, repository, runner_name, labels)
+        return {
+            "mode": "warm",
+            "runner_name": runner_name,
+            "repository": repository,
+            "labels": labels,
+            "runner_url": self.github.runner_url(installation, repository),
+            "encoded_jit_config": str(jit["encoded_jit_config"]),
+            "environment": runner_job_environment(
+                cargo_target_dir=(
+                    f"/cache/target/{cache_slug(repository).replace('/', '-').lower()}-warm"
+                ),
+            ),
+        }
+
+    async def _finalize_warm_transition(
+        self, instance_id: int, runner_name: str, outcome: str, *, clear_job: bool
+    ) -> str:
+        """Move a provisioning warm CT to ready/running after registration.
+
+        Returns the resolved target status. Raises if the instance moved to
+        an unexpected state concurrently (anything but the known-safe ones
+        below), instead of silently accepting a state we don't understand.
+        """
+        target_status = "ready" if outcome == "ready" else "running"
+        fields: dict[str, Any] = {"last_used_at": int(time.time()), "error": None}
+        if clear_job:
+            fields["job_id"] = None
+        transitioned = await self.db.transition_instance(
+            instance_id, {"provisioning"}, target_status, **fields
+        )
+        if not transitioned:
+            current = await self.db.get_instance(instance_id)
+            if current is None or current["status"] not in {
+                "ready",
+                "reserved",
+                "running",
+                "delete_pending",
+            }:
+                raise RuntimeError(
+                    f"warm runner {runner_name} changed to unexpected state: {current}"
+                )
+        return target_status
 
     async def _wait_for_warm_runner(
         self,
@@ -1693,45 +1723,16 @@ class Orchestrator:
             stale = await self.github.find_runner(installation, repository, runner_name)
             if stale:
                 await self.github.delete_runner(installation, repository, int(stale["id"]))
-            labels = self._warm_labels(policy)
-            jit = await self.github.generate_jit(installation, repository, runner_name, labels)
-            credential: dict[str, object] = {
-                "mode": "warm",
-                "runner_name": runner_name,
-                "repository": repository,
-                "labels": labels,
-                "runner_url": self.github.runner_url(installation, repository),
-                "encoded_jit_config": str(jit["encoded_jit_config"]),
-                "environment": runner_job_environment(
-                    cargo_target_dir=(
-                        f"/cache/target/{cache_slug(repository).replace('/', '-').lower()}-warm"
-                    ),
-                ),
-            }
+            credential = await self._build_warm_credential(
+                installation, repository, runner_name, policy
+            )
             await self.broker.inject(vmid, credential)
             outcome = await self._wait_for_warm_runner(
                 installation, repository, runner_name, instance_id
             )
-            target_status = "ready" if outcome == "ready" else "running"
-            transitioned = await self.db.transition_instance(
-                instance_id,
-                {"provisioning"},
-                target_status,
-                job_id=None,
-                last_used_at=int(time.time()),
-                error=None,
+            target_status = await self._finalize_warm_transition(
+                instance_id, runner_name, outcome, clear_job=True
             )
-            if not transitioned:
-                current_row = await self.db.get_instance(instance_id)
-                if current_row is None or current_row["status"] not in {
-                    "ready",
-                    "reserved",
-                    "running",
-                    "delete_pending",
-                }:
-                    raise RuntimeError(
-                        f"warm runner {runner_name} changed to unexpected state: {current_row}"
-                    )
             WARM_REGISTRATION.labels(f"recycle_{outcome}").inc()
             self.log(
                 "info",
