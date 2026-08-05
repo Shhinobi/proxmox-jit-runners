@@ -63,7 +63,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["BLE"]  # tests intentionally assert on broad exception types
+# Tests intentionally assert on broad exception types, and blocking file I/O in
+# an async fixture's one-time setup isn't the hot-path concern ASYNC guards
+# against in orchestrator/ itself.
+"tests/*" = ["BLE", "ASYNC"]
 
 [tool.mypy]
 python_version = "3.12"

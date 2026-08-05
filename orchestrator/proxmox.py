@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from .config import ProxmoxConfig, RunnerProfile
+from .security import CachedSecret
 
 
 class ProxmoxError(RuntimeError):
@@ -21,23 +21,26 @@ class ProxmoxClient:
         # Full clones of the golden template lock the source CT disk; concurrent
         # clone/destroy storms produce "CT is locked (disk)" and orphan VMIDs.
         self._clone_lock = asyncio.Lock()
+        self._token = CachedSecret(config.api_token_file)
+        # Shared across requests instead of one-per-call, for connection reuse.
+        self._client = httpx.AsyncClient(verify=config.verify_tls)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     def _headers(self) -> dict[str, str]:
-        token = Path(self.config.api_token_file).read_text(encoding="utf-8").strip()
-        if not token:
-            raise ProxmoxError("empty Proxmox API token")
-        return {"Authorization": f"PVEAPIToken={token}"}
+        return {"Authorization": f"PVEAPIToken={self._token.get()}"}
 
     async def request(self, method: str, path: str, data: dict[str, Any] | None = None) -> Any:
         query_method = method.upper() in {"GET", "DELETE"}
-        async with httpx.AsyncClient(verify=self.config.verify_tls, timeout=45) as client:
-            response = await client.request(
-                method,
-                f"{self.config.endpoint}/api2/json{path}",
-                headers=self._headers(),
-                params=data if query_method else None,
-                data=data if not query_method else None,
-            )
+        response = await self._client.request(
+            method,
+            f"{self.config.endpoint}/api2/json{path}",
+            headers=self._headers(),
+            params=data if query_method else None,
+            data=data if not query_method else None,
+            timeout=45,
+        )
         if response.is_error:
             raise ProxmoxError(f"Proxmox API {response.status_code}: {response.text[:500]}")
         payload = response.json()

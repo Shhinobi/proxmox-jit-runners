@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
 from typing import Any
 
 import httpx
 import jwt
 
 from .config import GitHubConfig, GitHubInstallation
+from .security import CachedSecret
 
 
 class GitHubError(RuntimeError):
@@ -21,13 +21,18 @@ class GitHubClient:
     def __init__(self, config: GitHubConfig):
         self.config = config
         self._installation_tokens: dict[int, tuple[str, int]] = {}
+        self._private_key = CachedSecret(config.private_key_file)
+        # Shared across requests instead of one-per-call, for connection reuse.
+        self._client = httpx.AsyncClient(follow_redirects=True)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     def _app_jwt(self) -> str:
         now = int(time.time())
-        private_key = Path(self.config.private_key_file).read_text(encoding="utf-8")
         return jwt.encode(
             {"iat": now - 30, "exp": now + 540, "iss": self.config.app_id},
-            private_key,
+            self._private_key.get(),
             algorithm="RS256",
         )
 
@@ -36,11 +41,11 @@ class GitHubClient:
         if cached and cached[1] > int(time.time()) + 60:
             return cached[0]
         headers = self._headers(self._app_jwt())
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                f"{self.config.api_url}/app/installations/{installation.installation_id}/access_tokens",
-                headers=headers,
-            )
+        response = await self._client.post(
+            f"{self.config.api_url}/app/installations/{installation.installation_id}/access_tokens",
+            headers=headers,
+            timeout=20,
+        )
         self._raise(response)
         data = response.json()
         # Installation tokens currently live for an hour. Refresh after 50 minutes.
@@ -98,17 +103,17 @@ class GitHubClient:
         last: Exception | None = None
         for attempt in range(attempts):
             try:
-                # follow_redirects: GitHub returns 307 when a user/org/repo was
-                # renamed (e.g. OldOwner → acme). Without following,
-                # generate-jitconfig returns an empty body and callers crash on
-                # missing encoded_jit_config.
-                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                    response = await client.request(
-                        method,
-                        f"{self.config.api_url}{path}",
-                        headers=self._headers(token),
-                        json=json,
-                    )
+                # follow_redirects=True is set on the shared client: GitHub returns
+                # 307 when a user/org/repo was renamed (e.g. OldOwner →
+                # acme). Without following, generate-jitconfig returns an
+                # empty body and callers crash on missing encoded_jit_config.
+                response = await self._client.request(
+                    method,
+                    f"{self.config.api_url}{path}",
+                    headers=self._headers(token),
+                    json=json,
+                    timeout=30,
+                )
                 self._raise(response)
                 if not response.content:
                     return {}

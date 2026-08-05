@@ -22,6 +22,9 @@ class FakeGitHub:
         self._next_id = max(self._next_id, rid + 1)
         return rid
 
+    async def aclose(self) -> None:
+        pass
+
     async def get_workflow_run(self, *_: Any) -> dict[str, str]:
         return {"event": "workflow_dispatch"}
 
@@ -91,6 +94,9 @@ class FakeProxmox:
         self.destroyed: list[int] = []
         self.running: set[int] = set()
 
+    async def aclose(self) -> None:
+        pass
+
     async def cluster_vmids(self) -> set[int]:
         return set()
 
@@ -116,6 +122,15 @@ class FakeBroker:
         self.attached: list[int] = []
         self.credentials: list[dict[str, object]] = []
         self.cleaned: list[int] = []
+        self.allowlist: list[str] = []
+        self.renamed: list[tuple[str, str]] = []
+        self.purged: list[str] = []
+        # Set by tests to exercise apply_repository_policies' partial-failure paths.
+        self.fail_rename = False
+        self.fail_purge = False
+
+    async def aclose(self) -> None:
+        pass
 
     async def attach_cache(self, vmid: int, _: str) -> None:
         self.attached.append(vmid)
@@ -129,3 +144,19 @@ class FakeBroker:
 
     async def cache_gc(self, min_age_days: int = 0) -> str:
         return f"gc purged=0 skipped=0 bytes=0 min_age_days={min_age_days}"
+
+    async def sync_allowlist(self, repositories: list[str]) -> str:
+        self.allowlist = sorted(repositories)
+        return f"synced {len(self.allowlist)}"
+
+    async def cache_rename(self, src: str, dst: str) -> str:
+        if self.fail_rename:
+            raise RuntimeError(f"broker unreachable: rename {src} -> {dst}")
+        self.renamed.append((src, dst))
+        return f"renamed {src} -> {dst}"
+
+    async def cache_purge(self, repository: str) -> str:
+        if self.fail_purge:
+            raise RuntimeError(f"broker unreachable: purge {repository}")
+        self.purged.append(repository)
+        return f"purged {repository}"

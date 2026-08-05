@@ -28,6 +28,7 @@ from .broker import BrokerClient
 from .config import Settings, load_settings
 from .db import Database
 from .github import GitHubClient
+from .models import InstanceListItem, JobListItem
 from .proxmox import ProxmoxClient
 from .security import read_secret, verify_webhook
 from .service import Orchestrator
@@ -124,7 +125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         status_filter: str | None = Query(default=None, alias="status"),
         repository: str | None = Query(default=None),
         mode: str | None = Query(default=None),
-    ) -> list[dict[str, object]]:
+    ) -> list[InstanceListItem]:
         return await orchestrator.db.list_instances(
             status=status_filter, repository=repository, mode=mode
         )
@@ -135,7 +136,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         status_filter: str | None = Query(default=None, alias="status"),
         repository: str | None = Query(default=None),
         mode: str | None = Query(default=None),
-    ) -> list[dict[str, object]]:
+    ) -> list[JobListItem]:
         return await orchestrator.db.list_jobs(
             limit=limit, status=status_filter, repository=repository, mode=mode
         )

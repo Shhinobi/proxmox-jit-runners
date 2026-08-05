@@ -5,7 +5,7 @@ import contextlib
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -144,6 +144,10 @@ class Orchestrator:
         for task in self._background_tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, *self._background_tasks, return_exceptions=True)
+        if self.github is not None:
+            await self.github.aclose()
+        if self.proxmox is not None:
+            await self.proxmox.aclose()
 
     async def webhook(
         self, delivery_id: str, event: str, payload: dict[str, Any]
@@ -836,11 +840,12 @@ class Orchestrator:
             job_id = int(job["job_id"])
             status = str(job.get("status") or "")
             # completed_at written but status later clobbered by late provision/in_progress.
-            if job.get("completed_at") is not None and status != "completed":
+            completed_at = job.get("completed_at")
+            if completed_at is not None and status != "completed":
                 repaired = await self.db.set_job_status(
                     job_id,
                     "completed",
-                    completed_at=int(job["completed_at"]),
+                    completed_at=int(completed_at),
                     error=job.get("error"),
                 )
                 if repaired:
@@ -971,33 +976,34 @@ class Orchestrator:
                     )
 
         # Instances stuck "running" for jobs that are already terminal (or gone).
-        for instance in await self.db.list_instances():
-            if instance.get("status") != "running" or not instance.get("job_id"):
+        for running_instance in await self.db.list_instances():
+            running_job_id = running_instance.get("job_id")
+            if running_instance.get("status") != "running" or not running_job_id:
                 continue
-            bound = int(instance["job_id"])
+            bound = int(running_job_id)
             bound_job = await self.db.get_job(bound)
             if bound_job is None or str(bound_job.get("status")) in self.db.JOB_TERMINAL_STATUSES:
-                age = now - int(instance.get("updated_at") or now)
+                age = now - int(running_instance.get("updated_at") or now)
                 if age < 60:
                     continue
-                mode = str(instance.get("mode") or "")
+                mode = str(running_instance.get("mode") or "")
                 if mode == "persistent":
                     await self.db.update_instance(
-                        int(instance["id"]), "ready", job_id=None, last_used_at=now
+                        int(running_instance["id"]), "ready", job_id=None, last_used_at=now
                     )
                 elif mode == "warm":
                     await self.db.transition_instance(
-                        int(instance["id"]),
+                        int(running_instance["id"]),
                         {"running"},
                         "provisioning",
                         job_id=None,
                         last_used_at=now,
                         error=None,
                     )
-                    self._schedule_warm_recycle(int(instance["id"]))
+                    self._schedule_warm_recycle(int(running_instance["id"]))
                 else:
                     await self.db.transition_instance(
-                        int(instance["id"]),
+                        int(running_instance["id"]),
                         {"running"},
                         "delete_pending",
                         error="stale_running_instance_job_terminal",
@@ -1005,9 +1011,10 @@ class Orchestrator:
                 self.log(
                     "warn",
                     "job",
-                    f"released instance vmid={instance.get('vmid')} stuck running for terminal job {bound}",
+                    f"released instance vmid={running_instance.get('vmid')} "
+                    f"stuck running for terminal job {bound}",
                     job_id=bound,
-                    vmid=instance.get("vmid"),
+                    vmid=running_instance.get("vmid"),
                     mode=mode,
                 )
 
@@ -1132,7 +1139,11 @@ class Orchestrator:
         now = int(time.time())
         await self._reconcile_stale_jobs(now)
         await self._reconcile_zombie_github_runners()
-        instances = await self.db.list_instances()
+        # _destroy_instance/_reconcile_warm_instance/_reconcile_running_instance are
+        # shared across call sites with heterogeneous dict sources (get_instance,
+        # find_instance_by_job, ...); widen back rather than typing them to the
+        # stricter InstanceListItem shape that's specific to list_instances().
+        instances = cast(list[dict[str, Any]], await self.db.list_instances())
         for instance in instances:
             age = now - int(instance["updated_at"])
             idle = now - int(instance.get("last_used_at") or instance["updated_at"])

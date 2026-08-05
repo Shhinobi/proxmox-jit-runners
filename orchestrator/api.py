@@ -17,6 +17,7 @@ from .config import (
     validate_capacity_budget,
     validate_repository_profiles,
 )
+from .models import InstanceListItem
 from .policy import cache_slug
 from .service import DRAIN_MARKER, Orchestrator
 
@@ -325,7 +326,7 @@ def metrics_summary() -> dict[str, Any]:
 
 def build_alerts(
     overview: dict[str, Any],
-    instances: list[dict[str, Any]],
+    instances: list[InstanceListItem],
     metrics: dict[str, Any],
 ) -> list[dict[str, str]]:
     alerts: list[dict[str, str]] = []

@@ -5,9 +5,11 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import aiosqlite
+
+from .models import InstanceListItem, JobListItem
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -535,7 +537,7 @@ class Database:
         status: str | None = None,
         repository: str | None = None,
         mode: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[JobListItem]:
         limit = max(1, min(int(limit), 200))
         clauses: list[str] = []
         params: list[Any] = []
@@ -584,14 +586,14 @@ class Database:
                 row["duration_seconds"] = max(0, end - int(created))
             else:
                 row["duration_seconds"] = None
-        return rows
+        return cast(list[JobListItem], rows)
 
     async def list_instances(
         self,
         status: str | None = None,
         repository: str | None = None,
         mode: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[InstanceListItem]:
         clauses: list[str] = []
         params: list[Any] = []
         if status:
@@ -629,7 +631,7 @@ class Database:
                 row["github_job_url"] = (
                     f"https://github.com/{repo}/actions/runs/{run_id}/job/{job_id}"
                 )
-        return rows
+        return cast(list[InstanceListItem], rows)
 
     async def list_deliveries(
         self,

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any, cast
 from unittest import mock
 
 import pytest
 
 from orchestrator.api import (
+    apply_repository_policies,
     build_alerts,
     build_overview,
     metrics_summary,
@@ -15,7 +17,10 @@ from orchestrator.api import (
     ui_directory,
 )
 from orchestrator.config import ConfigError, load_settings, save_repository_policies
+from orchestrator.db import Database
 from orchestrator.eventlog import EventLog
+from orchestrator.service import Orchestrator
+from tests.fakes import FakeBroker, FakeGitHub, FakeProxmox
 from tests.helpers import settings
 
 
@@ -321,3 +326,106 @@ def test_save_policies_can_update_installation_account(tmp_path: Path) -> None:
     assert (
         again.repositories["acme/example-app"].github_installation == "acme-personal"
     )
+
+
+@pytest.fixture
+async def policy_orchestrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    db: Database,
+    fake_github: FakeGitHub,
+    fake_proxmox: FakeProxmox,
+    fake_broker: FakeBroker,
+):
+    """A real Orchestrator wired to a writable copy of default-config.yaml.
+
+    apply_repository_policies() re-reads/writes the config file directly
+    (via save_repository_policies), independent of the in-memory settings
+    object — so both must point at the same file for validation to agree.
+    """
+    source = Path("orchestrator/default-config.yaml")
+    cfg = tmp_path / "config.yaml"
+    db_path = tmp_path / "state.db"
+    text = source.read_text(encoding="utf-8").replace(
+        "database_path: /var/lib/runner-orchestrator/state.db",
+        f"database_path: {db_path}",
+    )
+    cfg.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("RUNNER_ORCHESTRATOR_CONFIG", str(cfg))
+
+    orch = Orchestrator(
+        load_settings(cfg),
+        db,
+        cast(Any, fake_github),
+        cast(Any, fake_proxmox),
+        cast(Any, fake_broker),
+    )
+    yield orch
+    await orch.stop()
+
+
+async def test_apply_repository_policies_happy_path(
+    policy_orchestrator: Orchestrator, fake_broker: FakeBroker
+) -> None:
+    repos = {
+        "acme/example-app": {
+            "github_installation": "acme-app",
+            "default_mode": "ephemeral",
+            "warm_capacity": 1,
+            "allowed_modes": ["ephemeral", "pool"],
+            "allowed_events": ["push"],
+            "required_labels": ["self-hosted", "proxmox-lxc", "crossbuild"],
+        },
+    }
+
+    result = await apply_repository_policies(
+        policy_orchestrator, repos, capacity={"max_active": 3, "pool_size": 0}
+    )
+
+    assert result["ok"] is True
+    assert result["broker_synced"] is True
+    assert result["cache_ops"] == []
+    assert policy_orchestrator.settings.repositories["acme/example-app"].warm_capacity == 1
+    assert fake_broker.allowlist == ["acme/example-app"]
+
+
+async def test_apply_repository_policies_reports_partial_cache_failures(
+    policy_orchestrator: Orchestrator, fake_broker: FakeBroker
+) -> None:
+    """Broker rename/purge failures must not abort an otherwise-valid save.
+
+    apply_repository_policies() treats cache operations as best-effort:
+    the policy save is the source of truth and must still succeed (and be
+    reported as such) even if the broker is unreachable for the cache
+    side effects — but those failures must show up in cache_ops, not be
+    silently dropped.
+    """
+    fake_broker.fail_rename = True
+    fake_broker.fail_purge = True
+    repos = {
+        "acme/example-app": {
+            "github_installation": "acme-app",
+            "default_mode": "ephemeral",
+            "warm_capacity": 1,
+            "allowed_modes": ["ephemeral", "pool"],
+            "allowed_events": ["push"],
+            "required_labels": ["self-hosted", "proxmox-lxc", "crossbuild"],
+        },
+    }
+
+    result = await apply_repository_policies(
+        policy_orchestrator,
+        repos,
+        capacity={"max_active": 3, "pool_size": 0},
+        cache_renames=[{"from": "OldOwner/example-app", "to": "acme/example-app"}],
+        purge_orphan_cache=True,
+    )
+
+    # The save itself still succeeds — cache side effects are best-effort.
+    assert result["ok"] is True
+    assert "acme/example-service" in result["removed_repositories"]
+    assert any("rename" in op and "failed" in op for op in result["cache_ops"])
+    assert any("purge" in op and "failed" in op for op in result["cache_ops"])
+    # Failed ops must not have been recorded as if they'd succeeded.
+    assert fake_broker.renamed == []
+    assert fake_broker.purged == []
