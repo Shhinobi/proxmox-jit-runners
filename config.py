@@ -12,11 +12,27 @@ class ConfigError(ValueError):
     pass
 
 
+# Fallback profile name: the only one a fresh install ships with, and the one
+# pool-mode CTs always use (pool clones are pre-staged before any repository
+# claims them, so there's no per-repo preference to read yet).
+DEFAULT_PROFILE_NAME = "crossbuild-small"
+
+
 @dataclass(frozen=True)
 class RepositoryPolicy:
     github_installation: str = ""
     default_mode: str = "ephemeral"
     warm_capacity: int = 0
+    # 0 = no per-repo ceiling (only the global capacity.max_active applies).
+    max_concurrent: int = 0
+    # Elastic warm pool: scale warm_capacity down to warm_idle_capacity after
+    # warm_idle_after_seconds with no job activity for this repo, then scale
+    # back up to warm_capacity as soon as a job request arrives again.
+    # -1 = disabled (warm_capacity stays fixed, today's behavior).
+    warm_idle_capacity: int = -1
+    warm_idle_after_seconds: int = 0
+    # Must name a key in Settings.profiles (validated at load/save time).
+    profile: str = DEFAULT_PROFILE_NAME
     allowed_modes: tuple[str, ...] = ("ephemeral", "pool", "persistent")
     allowed_events: tuple[str, ...] = ("push", "workflow_dispatch", "schedule")
     required_labels: tuple[str, ...] = ("self-hosted", "proxmox-lxc", "crossbuild")
@@ -76,8 +92,10 @@ class BrokerConfig:
 class CacheConfig:
     root: str = "/srv/runner-cache"
     mount_path: str = "/cache"
-    max_usage_percent: int = 80
-    quota_gb: int = 40
+    # Usage/quota enforcement lives entirely on pve in runner-ct-broker.sh
+    # (RUNNER_CACHE_MAX_PERCENT / RUNNER_CACHE_QUOTA_GB) — there is no field
+    # here for it. The dashboard reads those values from the broker's own
+    # cache-list output, not from this config.
     # Auto-GC orphan dirs (not on allowlist) older than N days during reconcile.
     # 0 disables automatic GC (manual purge/gc via API still works).
     gc_orphan_days: int = 7
@@ -150,6 +168,10 @@ def repository_policy_to_dict(policy: RepositoryPolicy) -> dict[str, Any]:
         "github_installation": policy.github_installation,
         "default_mode": policy.default_mode,
         "warm_capacity": int(policy.warm_capacity),
+        "max_concurrent": int(policy.max_concurrent),
+        "warm_idle_capacity": int(policy.warm_idle_capacity),
+        "warm_idle_after_seconds": int(policy.warm_idle_after_seconds),
+        "profile": policy.profile,
         "allowed_modes": list(policy.allowed_modes),
         "allowed_events": list(policy.allowed_events),
         "required_labels": list(policy.required_labels),
@@ -233,15 +255,23 @@ def parse_capacity_config(
     return CapacityConfig(**values)
 
 
-def validate_capacity_vs_warm(
+def validate_capacity_budget(
     capacity: CapacityConfig, repositories: dict[str, RepositoryPolicy]
 ) -> None:
-    """Ensure global max_active can hold the sum of per-repo warm targets."""
+    """Ensure max_active can hold both the warm targets and the pool.
+
+    Ready pool/warm instances are pre-staged standby capacity (count_active()
+    excludes idle pool rows on purpose), but there's still no point letting an
+    operator configure more standby capacity than max_active could ever put to
+    work — the excess would just sit there, cloned, unused.
+    """
     warm_target = sum(int(policy.warm_capacity) for policy in repositories.values())
-    if warm_target > capacity.max_active:
+    budget = warm_target + int(capacity.pool_size)
+    if budget > capacity.max_active:
         raise ConfigError(
             f"capacity.max_active ({capacity.max_active}) must be >= sum of "
-            f"repository warm_capacity ({warm_target}); raise max_active or lower warm targets"
+            f"repository warm_capacity ({warm_target}) + capacity.pool_size "
+            f"({capacity.pool_size}); raise max_active or lower warm/pool targets"
         )
 
 
@@ -290,6 +320,10 @@ def parse_repository_policies(
             github_installation=str(value["github_installation"]),
             default_mode=str(value.get("default_mode", "ephemeral")),
             warm_capacity=int(value.get("warm_capacity", 0)),
+            max_concurrent=int(value.get("max_concurrent", 0)),
+            warm_idle_capacity=int(value.get("warm_idle_capacity", -1)),
+            warm_idle_after_seconds=int(value.get("warm_idle_after_seconds", 0)),
+            profile=str(value.get("profile", DEFAULT_PROFILE_NAME)),
             allowed_modes=tuple(value.get("allowed_modes", ["ephemeral", "pool", "persistent"])),
             allowed_events=tuple(
                 value.get("allowed_events", ["push", "workflow_dispatch", "schedule"])
@@ -317,13 +351,55 @@ def parse_repository_policies(
             raise ConfigError(f"{repo}: default_mode must be allowed")
         if policy.warm_capacity < 0:
             raise ConfigError(f"{repo}: warm_capacity must be non-negative")
+        if policy.max_concurrent < 0:
+            raise ConfigError(f"{repo}: max_concurrent must be non-negative")
+        if 0 < policy.max_concurrent < policy.warm_capacity:
+            raise ConfigError(
+                f"{repo}: max_concurrent ({policy.max_concurrent}) must be >= "
+                f"warm_capacity ({policy.warm_capacity}) when set"
+            )
+        if policy.warm_idle_capacity < -1:
+            raise ConfigError(f"{repo}: warm_idle_capacity must be >= -1")
+        if policy.warm_idle_capacity >= 0:
+            if policy.warm_idle_capacity > policy.warm_capacity:
+                raise ConfigError(
+                    f"{repo}: warm_idle_capacity ({policy.warm_idle_capacity}) must be "
+                    f"<= warm_capacity ({policy.warm_capacity})"
+                )
+            if policy.warm_idle_after_seconds <= 0:
+                raise ConfigError(
+                    f"{repo}: warm_idle_after_seconds must be > 0 when warm_idle_capacity is set"
+                )
         if not policy.allowed_modes:
             raise ConfigError(f"{repo}: allowed_modes must not be empty")
         if not policy.allowed_events:
             raise ConfigError(f"{repo}: allowed_events must not be empty")
         if not policy.required_labels:
             raise ConfigError(f"{repo}: required_labels must not be empty")
+        if not policy.profile.strip():
+            raise ConfigError(f"{repo}: profile must not be empty")
     return repositories
+
+
+def validate_repository_profiles(
+    repositories: dict[str, RepositoryPolicy], profiles: dict[str, "RunnerProfile"]
+) -> None:
+    """Every repo's profile (and the pool-mode default) must be a defined profile.
+
+    Catches a misconfigured `profiles:` map at load/save time instead of a
+    KeyError deep inside job provisioning, silently retried 3x.
+    """
+    if DEFAULT_PROFILE_NAME not in profiles:
+        raise ConfigError(
+            f"profiles must define {DEFAULT_PROFILE_NAME!r} (used for pool-mode CTs, "
+            "which are pre-staged before any repository claims them)"
+        )
+    for repo, policy in repositories.items():
+        if policy.profile not in profiles:
+            raise ConfigError(
+                f"{repo}: profile {policy.profile!r} is not defined in profiles "
+                f"(known: {sorted(profiles)})"
+            )
 
 
 def save_repository_policies(
@@ -348,7 +424,8 @@ def save_repository_policies(
         parsed_capacity = current.capacity
     else:
         parsed_capacity = parse_capacity_config(capacity, base=current.capacity)
-    validate_capacity_vs_warm(parsed_capacity, parsed)
+    validate_capacity_budget(parsed_capacity, parsed)
+    validate_repository_profiles(parsed, current.profiles)
     payload: dict[str, Any] = {
         "capacity": capacity_runtime_to_dict(parsed_capacity),
         "installations": {
@@ -439,8 +516,12 @@ def load_settings(path: str | Path | None = None) -> Settings:
     if not github.installations:
         raise ConfigError("at least one GitHub installation is required")
     repositories = parse_repository_policies(raw.get("repositories", {}), github.installations)
-    validate_capacity_vs_warm(capacity, repositories)
-    profiles = {name: RunnerProfile(**value) for name, value in raw.get("profiles", {"crossbuild-small": {}}).items()}
+    validate_capacity_budget(capacity, repositories)
+    profiles = {
+        name: RunnerProfile(**value)
+        for name, value in raw.get("profiles", {DEFAULT_PROFILE_NAME: {}}).items()
+    }
+    validate_repository_profiles(repositories, profiles)
     if proxmox.vmid_start > proxmox.vmid_end or proxmox.ip_start > proxmox.ip_end:
         raise ConfigError("invalid Proxmox VMID or IP range")
     return Settings(

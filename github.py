@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,9 @@ from .config import GitHubConfig, GitHubInstallation
 
 
 class GitHubError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class GitHubClient:
@@ -52,7 +55,10 @@ class GitHubClient:
     @staticmethod
     def _raise(response: httpx.Response) -> None:
         if response.is_error:
-            raise GitHubError(f"GitHub API {response.status_code}: {response.text[:500]}")
+            raise GitHubError(
+                f"GitHub API {response.status_code}: {response.text[:500]}",
+                status_code=response.status_code,
+            )
         # Unfollowed redirects (or unexpected 3xx bodies) produce empty payloads and
         # later KeyErrors like missing encoded_jit_config. Fail clearly instead.
         if 300 <= response.status_code < 400:
@@ -60,8 +66,19 @@ class GitHubClient:
             raise GitHubError(
                 f"GitHub API {response.status_code} redirect without follow "
                 f"(location={location!r}). Repository may have been renamed; "
-                f"update Policies installation account + repository owner."
+                f"update Policies installation account + repository owner.",
+                status_code=response.status_code,
             )
+
+    @staticmethod
+    def _retryable(exc: Exception) -> bool:
+        """Network blips and GitHub 5xx are worth a retry; 4xx are policy/auth
+        errors that won't fix themselves."""
+        if isinstance(exc, httpx.TransportError):
+            return True
+        if isinstance(exc, GitHubError):
+            return exc.status_code is not None and exc.status_code >= 500
+        return False
 
     async def request(
         self,
@@ -69,25 +86,43 @@ class GitHubClient:
         method: str,
         path: str,
         json: dict[str, Any] | None = None,
+        *,
+        attempts: int = 4,
+        base_delay: float = 1.0,
     ) -> dict[str, Any]:
         token = await self._token(installation)
-        # follow_redirects: GitHub returns 307 when a user/org/repo was renamed
-        # (e.g. OldOwner → acme). Without following, generate-jitconfig
-        # returns an empty body and callers crash on missing encoded_jit_config.
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            response = await client.request(
-                method, f"{self.config.api_url}{path}", headers=self._headers(token), json=json
-            )
-        self._raise(response)
-        if not response.content:
-            return {}
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise GitHubError(
-                f"GitHub API {response.status_code}: non-JSON body: {response.text[:300]}"
-            ) from exc
-        return data if isinstance(data, dict) else {"_items": data}
+        last: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                # follow_redirects: GitHub returns 307 when a user/org/repo was
+                # renamed (e.g. OldOwner → acme). Without following,
+                # generate-jitconfig returns an empty body and callers crash on
+                # missing encoded_jit_config.
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                    response = await client.request(
+                        method,
+                        f"{self.config.api_url}{path}",
+                        headers=self._headers(token),
+                        json=json,
+                    )
+                self._raise(response)
+                if not response.content:
+                    return {}
+                try:
+                    data = response.json()
+                except ValueError as exc:
+                    raise GitHubError(
+                        f"GitHub API {response.status_code}: non-JSON body: {response.text[:300]}",
+                        status_code=response.status_code,
+                    ) from exc
+                return data if isinstance(data, dict) else {"_items": data}
+            except Exception as exc:  # noqa: BLE001 - retry gate below decides fate
+                last = exc
+                if not self._retryable(exc) or attempt + 1 >= attempts:
+                    raise
+                await asyncio.sleep(base_delay * (attempt + 1))
+        assert last is not None
+        raise last
 
     async def get_workflow_run(
         self, installation: GitHubInstallation, repository: str, run_id: int

@@ -28,6 +28,10 @@ class BrokerClient:
             command,
         ]
 
+    # ConnectTimeout only bounds the SSH handshake; a hung remote script (or a
+    # broken pve) would otherwise stall the calling task forever.
+    _COMMAND_TIMEOUT_SECONDS = 120.0
+
     async def _run(self, command: str, payload: bytes = b"") -> str:
         operation = command.split(maxsplit=1)[0]
         with span("runner.broker", {"runner.broker.operation": operation}):
@@ -37,7 +41,17 @@ class BrokerClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await process.communicate(payload)
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(payload), timeout=self._COMMAND_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError as exc:
+                process.kill()
+                await process.wait()
+                raise BrokerError(
+                    f"broker command {operation!r} timed out after "
+                    f"{self._COMMAND_TIMEOUT_SECONDS}s"
+                ) from exc
             if process.returncode != 0:
                 raise BrokerError(f"broker command failed ({process.returncode}): {stderr.decode()[:500]}")
             return stdout.decode().strip()
