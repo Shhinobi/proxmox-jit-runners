@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -151,9 +152,24 @@ class ProxmoxClient:
                 "dport": "22",
                 "comment": "Allow deploy rsync/ssh to example-app a deploy target",
             },
-            {"type": "out", "action": "DROP", "dest": "10.0.0.0/8", "comment": "Deny RFC1918 lateral"},
-            {"type": "out", "action": "DROP", "dest": "172.16.0.0/12", "comment": "Deny RFC1918 lateral"},
-            {"type": "out", "action": "DROP", "dest": "192.168.0.0/16", "comment": "Deny RFC1918 lateral"},
+            {
+                "type": "out",
+                "action": "DROP",
+                "dest": "10.0.0.0/8",
+                "comment": "Deny RFC1918 lateral",
+            },
+            {
+                "type": "out",
+                "action": "DROP",
+                "dest": "172.16.0.0/12",
+                "comment": "Deny RFC1918 lateral",
+            },
+            {
+                "type": "out",
+                "action": "DROP",
+                "dest": "192.168.0.0/16",
+                "comment": "Deny RFC1918 lateral",
+            },
         ]
         # The Proxmox firewall API prepends new rules.  Create them bottom-up so
         # the effective top-down order keeps the OTLP exceptions ahead of the
@@ -210,7 +226,11 @@ class ProxmoxClient:
             msg = str(exc).lower()
             if any(
                 token in msg
-                for token in ("does not exist", "no such container", "configuration file does not exist")
+                for token in (
+                    "does not exist",
+                    "no such container",
+                    "configuration file does not exist",
+                )
             ):
                 return
             raise
@@ -222,19 +242,21 @@ class ProxmoxClient:
             msg = str(exc).lower()
             if any(
                 token in msg
-                for token in ("does not exist", "no such container", "configuration file does not exist")
+                for token in (
+                    "does not exist",
+                    "no such container",
+                    "configuration file does not exist",
+                )
             ):
                 return
             raise
         if config and config.get("mp0"):
-            try:
+            with contextlib.suppress(ProxmoxError):
                 await self.request_with_lock_retry(
                     "PUT",
                     f"/nodes/{self.config.node}/lxc/{vmid}/config",
                     {"delete": "mp0"},
                 )
-            except ProxmoxError:
-                pass
         try:
             await self.unlock(vmid)
             upid = await self.request_with_lock_retry(
@@ -246,7 +268,11 @@ class ProxmoxClient:
             msg = str(exc).lower()
             if any(
                 token in msg
-                for token in ("does not exist", "no such container", "configuration file does not exist")
+                for token in (
+                    "does not exist",
+                    "no such container",
+                    "configuration file does not exist",
+                )
             ):
                 return
             raise

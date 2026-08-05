@@ -37,11 +37,13 @@ against that binding.
 ## Quick start
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.lock
+uv sync
 cp orchestrator/default-config.yaml /etc/runner-orchestrator/config.yaml   # edit: GitHub App, Proxmox, broker, repositories
-python -m orchestrator   # or: uvicorn orchestrator.app:app --host 0.0.0.0 --port 8080
+uv run python -m orchestrator   # or: uv run uvicorn orchestrator.app:app --host 0.0.0.0 --port 8080
 ```
+
+Requires [`uv`](https://docs.astral.sh/uv/); `uv sync` creates `.venv` and
+installs pinned dependencies from `uv.lock`.
 
 Configuration is a single YAML file (`RUNNER_ORCHESTRATOR_CONFIG`, default
 `/etc/runner-orchestrator/config.yaml`) covering the GitHub App, the Proxmox
@@ -77,12 +79,16 @@ beyond a trusted network.
 ## Development
 
 ```bash
-pip install -r requirements.lock
-python -m unittest discover -s tests -v
+uv sync --dev
+uv run pytest
+uv run ruff check .
+uv run ruff format .
+uv run mypy orchestrator
 ```
 
 Tests use fakes for the GitHub/Proxmox/broker clients (no live cluster
-needed) plus an in-memory/temp-file SQLite database.
+needed) plus an in-memory/temp-file SQLite database. `uv run pre-commit
+install` wires ruff/mypy into a pre-commit hook.
 
 ## Origin
 

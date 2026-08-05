@@ -25,7 +25,11 @@ class GitHubClient:
     def _app_jwt(self) -> str:
         now = int(time.time())
         private_key = Path(self.config.private_key_file).read_text(encoding="utf-8")
-        return jwt.encode({"iat": now - 30, "exp": now + 540, "iss": self.config.app_id}, private_key, algorithm="RS256")
+        return jwt.encode(
+            {"iat": now - 30, "exp": now + 540, "iss": self.config.app_id},
+            private_key,
+            algorithm="RS256",
+        )
 
     async def _token(self, installation: GitHubInstallation) -> str:
         cached = self._installation_tokens.get(installation.installation_id)
@@ -157,9 +161,7 @@ class GitHubClient:
             )
         return data
 
-    async def registration_token(
-        self, installation: GitHubInstallation, repository: str
-    ) -> str:
+    async def registration_token(self, installation: GitHubInstallation, repository: str) -> str:
         base = self._runner_base(installation, repository)
         data = await self.request(
             installation, "POST", f"{base}/actions/runners/registration-token"
@@ -170,9 +172,7 @@ class GitHubClient:
         self, installation: GitHubInstallation, repository: str
     ) -> list[dict[str, Any]]:
         base = self._runner_base(installation, repository)
-        data = await self.request(
-            installation, "GET", f"{base}/actions/runners?per_page=100"
-        )
+        data = await self.request(installation, "GET", f"{base}/actions/runners?per_page=100")
         runners = data.get("runners", [])
         return [dict(r) for r in runners if isinstance(r, dict)]
 
@@ -192,9 +192,7 @@ class GitHubClient:
         self, installation: GitHubInstallation, repository: str, runner_id: int
     ) -> None:
         base = self._runner_base(installation, repository)
-        await self.request(
-            installation, "DELETE", f"{base}/actions/runners/{runner_id}"
-        )
+        await self.request(installation, "DELETE", f"{base}/actions/runners/{runner_id}")
 
     async def try_delete_runner(
         self, installation: GitHubInstallation, repository: str, runner_id: int

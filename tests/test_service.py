@@ -64,7 +64,9 @@ class VmidAllocationTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def test_allocates_first_free_vmid_in_range(self) -> None:
-        await self.db.create_instance(5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app")
+        await self.db.create_instance(
+            5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app"
+        )
 
         vmid, ip_address = await self.orchestrator._allocate()
 
@@ -72,15 +74,23 @@ class VmidAllocationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ip_address, "10.0.0.101")
 
     async def test_raises_when_range_is_exhausted(self) -> None:
-        await self.db.create_instance(5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app")
-        await self.db.create_instance(5001, "10.0.0.101", "warm", "ready", "OldOwner/example-app")
+        await self.db.create_instance(
+            5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app"
+        )
+        await self.db.create_instance(
+            5001, "10.0.0.101", "warm", "ready", "OldOwner/example-app"
+        )
 
         with self.assertRaisesRegex(RuntimeError, "VMID/IP range exhausted"):
             await self.orchestrator._allocate()
 
     async def test_reserve_instance_surfaces_exhaustion_to_caller(self) -> None:
-        await self.db.create_instance(5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app")
-        await self.db.create_instance(5001, "10.0.0.101", "warm", "ready", "OldOwner/example-app")
+        await self.db.create_instance(
+            5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app"
+        )
+        await self.db.create_instance(
+            5001, "10.0.0.101", "warm", "ready", "OldOwner/example-app"
+        )
 
         with self.assertRaises(RuntimeError):
             await self.orchestrator._reserve_instance(
@@ -261,9 +271,7 @@ class WarmRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.db = Database(str(Path(self.temp.name) / "state.db"))
         await self.db.initialize()
         base = settings()
-        policy = replace(
-            base.repositories["OldOwner/example-app"], warm_capacity=1
-        )
+        policy = replace(base.repositories["OldOwner/example-app"], warm_capacity=1)
         self.settings = replace(
             base,
             repositories={"OldOwner/example-app": policy},
@@ -286,9 +294,7 @@ class WarmRunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_warm_runner_is_registered_online_before_ready(self) -> None:
         policy = self.settings.repositories["OldOwner/example-app"]
-        await self.orchestrator._create_warm_runner(
-            "OldOwner/example-app", policy
-        )
+        await self.orchestrator._create_warm_runner("OldOwner/example-app", policy)
         instances = await self.db.list_instances()
         self.assertEqual(instances[0]["status"], "ready")
         self.assertEqual(self.proxmox.clones, [5000])
@@ -304,9 +310,7 @@ class WarmRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.github.busy = True
         policy = self.settings.repositories["OldOwner/example-app"]
 
-        created = await self.orchestrator._create_warm_runner(
-            "OldOwner/example-app", policy
-        )
+        created = await self.orchestrator._create_warm_runner("OldOwner/example-app", policy)
 
         instances = await self.db.list_instances()
         self.assertTrue(created)
@@ -314,9 +318,7 @@ class WarmRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(instances[0]["status"], "delete_failed")
 
     async def test_ephemeral_job_falls_back_to_ready_global_pool(self) -> None:
-        await self.db.create_instance(
-            5000, "10.0.0.100", "pool", "ready"
-        )
+        await self.db.create_instance(5000, "10.0.0.100", "pool", "ready")
         payload = webhook_payload(1234567)
         await self.db.enqueue_job("delivery-pool-fallback", payload, "ephemeral")
         job = await self.db.claim_next_job()
@@ -345,9 +347,7 @@ class WarmRunnerTests(unittest.IsolatedAsyncioTestCase):
             runner_name="pve-lxc-warm-5000",
         )
         stale = await self.db.get_instance(instance_id)
-        await self.db.transition_instance(
-            instance_id, {"delete_pending"}, "running", job_id=42
-        )
+        await self.db.transition_instance(instance_id, {"delete_pending"}, "running", job_id=42)
 
         await self.orchestrator._destroy_instance(stale)
 
@@ -380,6 +380,7 @@ class WarmRunnerTests(unittest.IsolatedAsyncioTestCase):
         """offline+busy must not block CT teardown forever."""
         self.github.busy = True
         self.github.register("pve-lxc-warm-5000")
+
         # Force offline status via list/find by patching find return.
         async def offline_busy(*_a: Any, **_k: Any) -> dict[str, object]:
             return {
@@ -612,9 +613,7 @@ class WarmRunnerTests(unittest.IsolatedAsyncioTestCase):
         payload["action"] = "completed"
         payload["workflow_job"]["runner_name"] = "pve-lxc-warm-5000"
 
-        await self.orchestrator.webhook(
-            "delivery-late-completed", "workflow_job", payload
-        )
+        await self.orchestrator.webhook("delivery-late-completed", "workflow_job", payload)
 
         instance = await self.db.get_instance(instance_id)
         self.assertEqual(instance["status"], "running")
@@ -666,9 +665,7 @@ class WarmRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_queued_job_waits_for_warm_without_preclaim(self) -> None:
         """Do not bind a specific warm on queued — GitHub picks among equal labels."""
         policy = self.settings.repositories["OldOwner/example-app"]
-        await self.orchestrator._create_warm_runner(
-            "OldOwner/example-app", policy
-        )
+        await self.orchestrator._create_warm_runner("OldOwner/example-app", policy)
         payload = webhook_payload(1234567)
         await self.db.enqueue_job("delivery-warm", payload, "ephemeral")
         job = await self.db.claim_next_job()
@@ -791,8 +788,9 @@ class JobRetryBackoffTests(unittest.IsolatedAsyncioTestCase):
         async def fake_sleep(delay: float) -> None:
             sleeps.append(delay)
 
-        with mock.patch.object(Orchestrator, "_provision", failing_provision), mock.patch(
-            "orchestrator.service.asyncio.sleep", fake_sleep
+        with (
+            mock.patch.object(Orchestrator, "_provision", failing_provision),
+            mock.patch("orchestrator.service.asyncio.sleep", fake_sleep),
         ):
             for _ in range(3):
                 job = await self.db.claim_next_job()
@@ -957,9 +955,7 @@ class WarmIdleScalingTests(unittest.IsolatedAsyncioTestCase):
         await self.orchestrator._replenish_warm_pool()
 
         instances = await self.db.list_instances()
-        self.assertEqual(
-            sum(1 for i in instances if i["status"] == "delete_pending"), 3
-        )
+        self.assertEqual(sum(1 for i in instances if i["status"] == "delete_pending"), 3)
         self.assertEqual(sum(1 for i in instances if i["status"] == "ready"), 1)
 
     async def test_stays_at_full_capacity_within_idle_window(self) -> None:

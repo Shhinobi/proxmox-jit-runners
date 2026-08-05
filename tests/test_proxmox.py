@@ -110,9 +110,11 @@ class LockRetryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_raises_after_exhausting_attempts_on_persistent_lock(self) -> None:
         client = CountingErrorProxmoxClient("still locked (disk)")
-        with mock.patch("orchestrator.proxmox.asyncio.sleep", mock.AsyncMock()):
-            with self.assertRaises(ProxmoxError):
-                await client.request_with_lock_retry("POST", "/x", attempts=3, base_delay=0)
+        with (
+            mock.patch("orchestrator.proxmox.asyncio.sleep", mock.AsyncMock()),
+            self.assertRaises(ProxmoxError),
+        ):
+            await client.request_with_lock_retry("POST", "/x", attempts=3, base_delay=0)
         self.assertEqual(client.attempts, 3)
 
 
@@ -124,7 +126,12 @@ class CloneTests(unittest.IsolatedAsyncioTestCase):
             {"status": "stopped", "exitstatus": "OK"},  # GET task status (wait_task)
             None,  # PUT config
             None,  # PUT firewall/options
-            None, None, None, None, None, None,  # POST firewall/rules x6
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,  # POST firewall/rules x6
         ]
         client = ScriptedProxmoxClient(responses)
         profile = RunnerProfile()
@@ -152,7 +159,9 @@ class CloneTests(unittest.IsolatedAsyncioTestCase):
             [upid, {"status": "stopped", "exitstatus": "clone failed: disk full"}]
         )
         with self.assertRaises(ProxmoxError):
-            await client.clone(5000, "pve-lxc-5000", "10.0.0.100", RunnerProfile(), "ephemeral", None)
+            await client.clone(
+                5000, "pve-lxc-5000", "10.0.0.100", RunnerProfile(), "ephemeral", None
+            )
         # Never reached config/firewall calls after the clone task itself failed.
         self.assertEqual(len(client.calls), 2)
 
@@ -181,7 +190,9 @@ class DestroyTests(unittest.IsolatedAsyncioTestCase):
         )
         await client.destroy(5000)
         methods = [m for m, _, _ in client.calls]
-        self.assertNotIn(("POST", "/nodes/pve/lxc/5000/status/stop"), [(m, p) for m, p, _ in client.calls])
+        self.assertNotIn(
+            ("POST", "/nodes/pve/lxc/5000/status/stop"), [(m, p) for m, p, _ in client.calls]
+        )
         self.assertEqual(methods[-2], "DELETE")
 
     async def test_destroy_stops_running_ct_and_clears_mp0_before_delete(self) -> None:

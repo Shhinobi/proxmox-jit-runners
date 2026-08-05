@@ -17,6 +17,7 @@ from .config import (
     validate_capacity_budget,
     validate_repository_profiles,
 )
+from .policy import cache_slug
 from .service import DRAIN_MARKER, Orchestrator
 
 
@@ -108,6 +109,8 @@ async def apply_repository_policies(
         if not src or not dst or src == dst:
             continue
         try:
+            cache_slug(src)
+            cache_slug(dst)
             result = await orchestrator.broker.cache_rename(src, dst)
             cache_ops.append(result)
             orchestrator.log(
@@ -138,6 +141,7 @@ async def apply_repository_policies(
     if purge_orphan_cache and removed:
         for repo in removed:
             try:
+                cache_slug(repo)
                 result = await orchestrator.broker.cache_purge(repo)
                 cache_ops.append(result)
                 orchestrator.log("info", "cache", f"purged removed-policy cache {repo}")
@@ -188,17 +192,15 @@ async def list_cache_inventory(orchestrator: Orchestrator) -> dict[str, Any]:
     return data
 
 
-async def purge_cache_repository(
-    orchestrator: Orchestrator, repository: str
-) -> dict[str, Any]:
+async def purge_cache_repository(orchestrator: Orchestrator, repository: str) -> dict[str, Any]:
     repo = repository.strip()
-    if "/" not in repo:
-        raise ValueError("repository must be OWNER/NAME")
+    try:
+        cache_slug(repo)
+    except ValueError as exc:
+        raise ValueError("repository must be OWNER/NAME (alphanumeric, -, _ only)") from exc
     # Refuse purge of active policy repos unless explicitly still allowed —
     # operator may purge active cache (cold rebuild); warn only.
-    active = repo.casefold() in {
-        name.casefold() for name in orchestrator.settings.repositories
-    }
+    active = repo.casefold() in {name.casefold() for name in orchestrator.settings.repositories}
     result = await orchestrator.broker.cache_purge(repo)
     orchestrator.log(
         "warn" if active else "info",
@@ -221,6 +223,11 @@ async def rename_cache_repository(
     dst = to_repo.strip()
     if src == dst:
         raise ValueError("from and to repositories must differ")
+    try:
+        cache_slug(src)
+        cache_slug(dst)
+    except ValueError as exc:
+        raise ValueError("repositories must be OWNER/NAME (alphanumeric, -, _ only)") from exc
     result = await orchestrator.broker.cache_rename(src, dst)
     orchestrator.log("info", "cache", f"renamed cache {src} → {dst}")
     return {
@@ -272,20 +279,30 @@ def metrics_summary() -> dict[str, Any]:
             elif name == "runner_orchestrator_provision_seconds" and sample.name.endswith("_count"):
                 mode = labels.get("mode", "unknown")
                 provision.setdefault(mode, {})["count"] = value
-            elif name == "runner_orchestrator_job_queue_wait_seconds" and sample.name.endswith("_sum"):
+            elif name == "runner_orchestrator_job_queue_wait_seconds" and sample.name.endswith(
+                "_sum"
+            ):
                 mode = labels.get("mode", "unknown")
                 queue_wait.setdefault(mode, {})["sum"] = value
-            elif name == "runner_orchestrator_job_queue_wait_seconds" and sample.name.endswith("_count"):
+            elif name == "runner_orchestrator_job_queue_wait_seconds" and sample.name.endswith(
+                "_count"
+            ):
                 mode = labels.get("mode", "unknown")
                 queue_wait.setdefault(mode, {})["count"] = value
             elif name == "runner_orchestrator_webhooks_total" and sample.name.endswith("_total"):
                 key = f"{labels.get('result', '?')}:{labels.get('reason', '?')}"
                 webhooks[key] = value
-            elif name == "runner_orchestrator_provision_failures_total" and sample.name.endswith("_total"):
+            elif name == "runner_orchestrator_provision_failures_total" and sample.name.endswith(
+                "_total"
+            ):
                 provision_failures[labels.get("mode", "unknown")] = value
-            elif name == "runner_orchestrator_cleanup_failures_total" and sample.name.endswith("_total"):
+            elif name == "runner_orchestrator_cleanup_failures_total" and sample.name.endswith(
+                "_total"
+            ):
                 cleanup_failures[labels.get("mode", "unknown")] = value
-            elif name == "runner_orchestrator_warm_registration_total" and sample.name.endswith("_total"):
+            elif name == "runner_orchestrator_warm_registration_total" and sample.name.endswith(
+                "_total"
+            ):
                 warm_registration[labels.get("outcome", "unknown")] = value
 
     def averages(series: dict[str, dict[str, float]]) -> dict[str, float | None]:
@@ -382,9 +399,7 @@ def build_alerts(
                 ),
             }
         )
-    delete_failed = [
-        inst for inst in instances if str(inst.get("status")) == "delete_failed"
-    ]
+    delete_failed = [inst for inst in instances if str(inst.get("status")) == "delete_failed"]
     if delete_failed:
         parts = []
         for inst in delete_failed:

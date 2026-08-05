@@ -35,7 +35,11 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(decision.mode, "ephemeral")
 
     def test_explicit_pool_mode_is_accepted(self) -> None:
-        decision = decide(settings(), payload(["self-hosted", "proxmox-lxc", "crossbuild", "mode-pool"]), "workflow_dispatch")
+        decision = decide(
+            settings(),
+            payload(["self-hosted", "proxmox-lxc", "crossbuild", "mode-pool"]),
+            "workflow_dispatch",
+        )
         self.assertTrue(decision.accepted)
         self.assertEqual(decision.mode, "pool")
 
@@ -50,7 +54,9 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(decide(settings(), payload(), "pull_request").reason, "event_not_allowed")
 
     def test_missing_required_label_is_rejected(self) -> None:
-        self.assertEqual(decide(settings(), payload(["self-hosted"]), "push").reason, "required_labels_missing")
+        self.assertEqual(
+            decide(settings(), payload(["self-hosted"]), "push").reason, "required_labels_missing"
+        )
 
     def test_unknown_repository_is_rejected(self) -> None:
         other = payload()
@@ -91,7 +97,11 @@ class CapacityBudgetTests(unittest.TestCase):
 
 class RepositoryPolicyMaxConcurrentTests(unittest.TestCase):
     def _installations(self) -> dict[str, GitHubInstallation]:
-        return {"personal": GitHubInstallation(account="OldOwner", installation_id=1, scope="repository")}
+        return {
+            "personal": GitHubInstallation(
+                account="OldOwner", installation_id=1, scope="repository"
+            )
+        }
 
     def test_rejects_negative_max_concurrent(self) -> None:
         raw = {
@@ -138,7 +148,11 @@ class RepositoryPolicyMaxConcurrentTests(unittest.TestCase):
 
 class WarmIdleCapacityValidationTests(unittest.TestCase):
     def _installations(self) -> dict[str, GitHubInstallation]:
-        return {"personal": GitHubInstallation(account="OldOwner", installation_id=1, scope="repository")}
+        return {
+            "personal": GitHubInstallation(
+                account="OldOwner", installation_id=1, scope="repository"
+            )
+        }
 
     def test_disabled_by_default(self) -> None:
         raw = {
@@ -203,7 +217,11 @@ class WarmIdleCapacityValidationTests(unittest.TestCase):
 
 class RepositoryProfileValidationTests(unittest.TestCase):
     def _installations(self) -> dict[str, GitHubInstallation]:
-        return {"personal": GitHubInstallation(account="OldOwner", installation_id=1, scope="repository")}
+        return {
+            "personal": GitHubInstallation(
+                account="OldOwner", installation_id=1, scope="repository"
+            )
+        }
 
     def test_defaults_to_crossbuild_small(self) -> None:
         raw = {"OldOwner/example-app": {"github_installation": "personal"}}

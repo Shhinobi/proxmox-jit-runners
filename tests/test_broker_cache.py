@@ -6,7 +6,12 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from orchestrator.api import gc_orphan_cache, list_cache_inventory, purge_cache_repository, rename_cache_repository
+from orchestrator.api import (
+    gc_orphan_cache,
+    list_cache_inventory,
+    purge_cache_repository,
+    rename_cache_repository,
+)
 from orchestrator.broker import BrokerClient, BrokerError
 from orchestrator.config import BrokerConfig, CacheConfig
 
@@ -48,9 +53,11 @@ class BrokerCacheClientTests(unittest.IsolatedAsyncioTestCase):
         async def fake_run(command: str, payload: bytes = b"") -> str:
             return "not-json"
 
-        with mock.patch.object(client, "_run", side_effect=fake_run):
-            with self.assertRaises(BrokerError):
-                await client.cache_list()
+        with (
+            mock.patch.object(client, "_run", side_effect=fake_run),
+            self.assertRaises(BrokerError),
+        ):
+            await client.cache_list()
 
     async def test_run_times_out_and_kills_hung_process(self) -> None:
         client = BrokerClient(BrokerConfig(), CacheConfig())
@@ -76,12 +83,15 @@ class BrokerCacheClientTests(unittest.IsolatedAsyncioTestCase):
         async def fake_create_subprocess_exec(*_args: Any, **_kwargs: Any) -> _FakeProcess:
             return fake_process
 
-        with mock.patch(
-            "orchestrator.broker.asyncio.create_subprocess_exec",
-            side_effect=fake_create_subprocess_exec,
-        ), mock.patch.object(BrokerClient, "_COMMAND_TIMEOUT_SECONDS", 0.05):
-            with self.assertRaises(BrokerError) as ctx:
-                await client._run("cache-list")
+        with (
+            mock.patch(
+                "orchestrator.broker.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ),
+            mock.patch.object(BrokerClient, "_COMMAND_TIMEOUT_SECONDS", 0.05),
+            self.assertRaises(BrokerError) as ctx,
+        ):
+            await client._run("cache-list")
 
         self.assertTrue(fake_process.killed)
         self.assertTrue(fake_process.waited)
@@ -136,7 +146,9 @@ class CacheApiHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(purge["active_policy"])
 
         rename = await rename_cache_repository(
-            _Orch(), "OldOwner/example-app", "acme/example-app"  # type: ignore[arg-type]
+            _Orch(),
+            "OldOwner/example-app",
+            "acme/example-app",  # type: ignore[arg-type]
         )
         self.assertIn("renamed", rename["message"])
 

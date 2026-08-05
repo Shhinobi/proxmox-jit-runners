@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Collection
+from typing import Any
 
 import aiosqlite
-
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -79,9 +79,7 @@ async def _migration_001_instances_error(db: aiosqlite.Connection) -> None:
 
 async def _migration_002_instances_use_count(db: aiosqlite.Connection) -> None:
     if "use_count" not in await _instance_columns(db):
-        await db.execute(
-            "ALTER TABLE instances ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0"
-        )
+        await db.execute("ALTER TABLE instances ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0")
 
 
 async def _migration_003_instances_delete_attempts(db: aiosqlite.Connection) -> None:
@@ -202,20 +200,24 @@ class Database:
         "provisioning": frozenset({"queued", "provisioning"}),
         "waiting_for_runner": frozenset({"queued", "provisioning", "waiting_for_runner"}),
         "running": frozenset({"queued", "provisioning", "waiting_for_runner", "running"}),
-        "completed": frozenset({
-            "queued",
-            "provisioning",
-            "waiting_for_runner",
-            "running",
-            "completed",
-        }),
-        "failed": frozenset({
-            "queued",
-            "provisioning",
-            "waiting_for_runner",
-            "running",
-            "failed",
-        }),
+        "completed": frozenset(
+            {
+                "queued",
+                "provisioning",
+                "waiting_for_runner",
+                "running",
+                "completed",
+            }
+        ),
+        "failed": frozenset(
+            {
+                "queued",
+                "provisioning",
+                "waiting_for_runner",
+                "running",
+                "failed",
+            }
+        ),
         "rejected": frozenset({"queued", "rejected"}),
     }
 
@@ -272,7 +274,10 @@ class Database:
                 (vmid, ip_address, repository, mode, runner_name, status, job_id, now, now, now),
             )
             await db.commit()
-            return int(cursor.lastrowid)
+            row_id = cursor.lastrowid
+            if row_id is None:
+                raise RuntimeError("insert did not return a row id")
+            return row_id
 
     async def update_instance(self, instance_id: int, status: str, **fields: Any) -> None:
         allowed = {
@@ -502,7 +507,9 @@ class Database:
         return int((row or {"total": 0})["total"])
 
     async def count_ready_pool(self) -> int:
-        row = await self._fetchone("SELECT COUNT(*) AS total FROM instances WHERE mode='pool' AND status='ready'")
+        row = await self._fetchone(
+            "SELECT COUNT(*) AS total FROM instances WHERE mode='pool' AND status='ready'"
+        )
         return int((row or {"total": 0})["total"])
 
     async def oldest_queued_job_age(self) -> int:
@@ -517,7 +524,9 @@ class Database:
 
     async def status_summary(self) -> dict[str, Any]:
         jobs = await self._fetchall("SELECT status, COUNT(*) AS total FROM jobs GROUP BY status")
-        instances = await self._fetchall("SELECT mode, status, COUNT(*) AS total FROM instances GROUP BY mode, status")
+        instances = await self._fetchall(
+            "SELECT mode, status, COUNT(*) AS total FROM instances GROUP BY mode, status"
+        )
         return {"jobs": jobs, "instances": instances}
 
     async def list_jobs(

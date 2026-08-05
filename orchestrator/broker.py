@@ -20,10 +20,14 @@ class BrokerClient:
     def _ssh(self, command: str) -> list[str]:
         return [
             "ssh",
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=10",
-            "-o", f"UserKnownHostsFile={self.config.known_hosts_file}",
-            "-i", self.config.key_file,
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            f"UserKnownHostsFile={self.config.known_hosts_file}",
+            "-i",
+            self.config.key_file,
             f"{self.config.user}@{self.config.host}",
             command,
         ]
@@ -45,15 +49,16 @@ class BrokerClient:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(payload), timeout=self._COMMAND_TIMEOUT_SECONDS
                 )
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 process.kill()
                 await process.wait()
                 raise BrokerError(
-                    f"broker command {operation!r} timed out after "
-                    f"{self._COMMAND_TIMEOUT_SECONDS}s"
+                    f"broker command {operation!r} timed out after {self._COMMAND_TIMEOUT_SECONDS}s"
                 ) from exc
             if process.returncode != 0:
-                raise BrokerError(f"broker command failed ({process.returncode}): {stderr.decode()[:500]}")
+                raise BrokerError(
+                    f"broker command failed ({process.returncode}): {stderr.decode()[:500]}"
+                )
             return stdout.decode().strip()
 
     async def attach_cache(self, vmid: int, repository: str) -> None:

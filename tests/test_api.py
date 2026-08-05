@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import unittest
-from pathlib import Path
-
 import tempfile
+import unittest
 from pathlib import Path
 from unittest import mock
 
@@ -22,9 +20,7 @@ class ApiHelperTests(unittest.TestCase):
         self.assertEqual(privacy.default_mode, "ephemeral")
         self.assertEqual(privacy.warm_capacity, 2)
         self.assertGreaterEqual(loaded.capacity.max_active, 3)  # ninja 1 + privacy 2
-        self.assertEqual(
-            loaded.github.installations["acme-app"].account, "acme"
-        )
+        self.assertEqual(loaded.github.installations["acme-app"].account, "acme")
 
     def test_public_policies_exclude_secrets(self) -> None:
         data = public_policies(settings())
@@ -239,7 +235,9 @@ class ApiHelperTests(unittest.TestCase):
                 repos, cfg, capacity={"max_active": 4, "pool_size": 1}
             )
             self.assertEqual(loaded.repositories["acme/example-app"].warm_capacity, 2)
-            self.assertEqual(loaded.repositories["acme/example-service"].default_mode, "pool")
+            self.assertEqual(
+                loaded.repositories["acme/example-service"].default_mode, "pool"
+            )
             self.assertEqual(loaded.capacity.max_active, 4)
             self.assertEqual(loaded.capacity.pool_size, 1)
             override = Path(tmp) / "repositories-override.yaml"
@@ -247,7 +245,9 @@ class ApiHelperTests(unittest.TestCase):
             override_text = override.read_text(encoding="utf-8")
             self.assertIn("max_active", override_text)
             again = load_settings(cfg)
-            self.assertEqual(again.repositories["acme/example-app"].default_mode, "ephemeral")
+            self.assertEqual(
+                again.repositories["acme/example-app"].default_mode, "ephemeral"
+            )
             self.assertEqual(again.capacity.max_active, 4)
             with self.assertRaises(ConfigError):
                 save_repository_policies(

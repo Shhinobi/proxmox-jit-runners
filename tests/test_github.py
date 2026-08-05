@@ -57,12 +57,8 @@ class GitHubScopeTests(unittest.IsolatedAsyncioTestCase):
     async def test_organization_uses_org_endpoint_and_group(self) -> None:
         client = RecordingGitHubClient()
         installation = GitHubInstallation("AcmeOrg", 200, "organization", runner_group_id=7)
-        await client.generate_jit(
-            installation, "AcmeOrg/Project", "runner-2", ["crossbuild"]
-        )
-        self.assertEqual(
-            client.calls[0][2], "/orgs/AcmeOrg/actions/runners/generate-jitconfig"
-        )
+        await client.generate_jit(installation, "AcmeOrg/Project", "runner-2", ["crossbuild"])
+        self.assertEqual(client.calls[0][2], "/orgs/AcmeOrg/actions/runners/generate-jitconfig")
         self.assertEqual(client.calls[0][3]["runner_group_id"], 7)
         self.assertEqual(
             client.runner_url(installation, "AcmeOrg/Project"),
@@ -72,13 +68,9 @@ class GitHubScopeTests(unittest.IsolatedAsyncioTestCase):
     async def test_runner_lookup_and_delete_use_repository_scope(self) -> None:
         client = RecordingGitHubClient()
         installation = GitHubInstallation("OldOwner", 1234567, "repository")
-        runner = await client.find_runner(
-            installation, "OldOwner/example-app", "runner-1"
-        )
+        runner = await client.find_runner(installation, "OldOwner/example-app", "runner-1")
         self.assertEqual(runner["id"], 10)
-        await client.delete_runner(
-            installation, "OldOwner/example-app", int(runner["id"])
-        )
+        await client.delete_runner(installation, "OldOwner/example-app", int(runner["id"]))
         self.assertEqual(
             client.calls[-1][2],
             "/repos/OldOwner/example-app/actions/runners/10",
@@ -119,9 +111,11 @@ class GitHubRetryTests(unittest.IsolatedAsyncioTestCase):
                 raise result
             return result
 
-        with mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="tok")), \
-             mock.patch.object(httpx.AsyncClient, "request", side_effect=fake_request), \
-             mock.patch("orchestrator.github.asyncio.sleep", mock.AsyncMock()):
+        with (
+            mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="tok")),
+            mock.patch.object(httpx.AsyncClient, "request", side_effect=fake_request),
+            mock.patch("orchestrator.github.asyncio.sleep", mock.AsyncMock()),
+        ):
             data = await client.request(installation, "GET", "/foo", base_delay=0)
 
         self.assertEqual(data, {"ok": True})
@@ -137,10 +131,12 @@ class GitHubRetryTests(unittest.IsolatedAsyncioTestCase):
             calls += 1
             return httpx.Response(404, json={"message": "not found"})
 
-        with mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="tok")), \
-             mock.patch.object(httpx.AsyncClient, "request", side_effect=fake_request):
-            with self.assertRaises(GitHubError) as ctx:
-                await client.request(installation, "GET", "/foo", attempts=3, base_delay=0)
+        with (
+            mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="tok")),
+            mock.patch.object(httpx.AsyncClient, "request", side_effect=fake_request),
+            self.assertRaises(GitHubError) as ctx,
+        ):
+            await client.request(installation, "GET", "/foo", attempts=3, base_delay=0)
 
         self.assertEqual(calls, 1)
         self.assertEqual(ctx.exception.status_code, 404)
@@ -155,10 +151,12 @@ class GitHubRetryTests(unittest.IsolatedAsyncioTestCase):
             calls += 1
             return httpx.Response(503, json={"message": "unavailable"})
 
-        with mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="tok")), \
-             mock.patch.object(httpx.AsyncClient, "request", side_effect=fake_request), \
-             mock.patch("orchestrator.github.asyncio.sleep", mock.AsyncMock()):
-            with self.assertRaises(GitHubError):
-                await client.request(installation, "GET", "/foo", attempts=3, base_delay=0)
+        with (
+            mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="tok")),
+            mock.patch.object(httpx.AsyncClient, "request", side_effect=fake_request),
+            mock.patch("orchestrator.github.asyncio.sleep", mock.AsyncMock()),
+            self.assertRaises(GitHubError),
+        ):
+            await client.request(installation, "GET", "/foo", attempts=3, base_delay=0)
 
         self.assertEqual(calls, 3)

@@ -32,7 +32,9 @@ from tests.helpers import settings
 from tests.test_service import FakeBroker, FakeGitHub, FakeProxmox
 
 
-def _build_client(tmp_dir: str, *, webhook_secret: str = "test-secret") -> tuple[TestClient, Orchestrator]:
+def _build_client(
+    tmp_dir: str, *, webhook_secret: str = "test-secret"
+) -> tuple[TestClient, Orchestrator]:
     secret_path = Path(tmp_dir) / "webhook-secret"
     secret_path.write_text(webhook_secret, encoding="utf-8")
     db_path = str(Path(tmp_dir) / "state.db")

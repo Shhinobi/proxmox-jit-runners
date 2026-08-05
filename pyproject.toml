@@ -1,0 +1,88 @@
+[project]
+name = "proxmox-jit-runners"
+version = "0.2.0"
+description = "Self-hosted GitHub Actions runner orchestrator for Proxmox LXC templates"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite==0.21.0",
+    "cryptography==45.0.5",
+    "fastapi==0.116.1",
+    "httpx==0.28.1",
+    "opentelemetry-api==1.36.0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.36.0",
+    "opentelemetry-instrumentation-fastapi==0.57b0",
+    "opentelemetry-instrumentation-httpx==0.57b0",
+    "opentelemetry-instrumentation-logging==0.57b0",
+    "opentelemetry-sdk==1.36.0",
+    "prometheus-client==0.22.1",
+    "PyJWT==2.10.1",
+    "PyYAML==6.0.2",
+    "uvicorn==0.35.0",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.14",
+    "pre-commit>=4.0",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+    "types-pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["orchestrator"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "BLE",  # flake8-blind-except
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "ASYNC", # flake8-async (blocking calls in async defs, etc.)
+]
+ignore = [
+    "E501",    # line length is enforced by the formatter, not worth a hard error on strings/URLs
+    "ASYNC109", # flags any async def with a `timeout` parameter, incl. legitimate polling
+                # deadlines (e.g. ProxmoxClient.wait_task) that don't wrap asyncio.wait_for
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["BLE"]  # tests intentionally assert on broad exception types
+
+[tool.mypy]
+python_version = "3.12"
+files = ["orchestrator"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+# The domain layer (service.py/db.py/api.py) still passes dict[str, Any] rows
+# around (see Fase 3 of the modernization plan for typed-model migration);
+# start lenient repo-wide and tighten module-by-module as that lands.
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "opentelemetry.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["orchestrator"]

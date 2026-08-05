@@ -17,9 +17,7 @@ class Decision:
     labels: tuple[str, ...] = ()
 
 
-def repository_policy(
-    settings: Settings, repository: str
-) -> tuple[str, RepositoryPolicy] | None:
+def repository_policy(settings: Settings, repository: str) -> tuple[str, RepositoryPolicy] | None:
     """Resolve GitHub repository names using GitHub's case-insensitive semantics."""
     wanted = repository.casefold()
     return next(
@@ -43,7 +41,7 @@ def decide(settings: Settings, payload: dict[str, Any], run_event: str | None = 
 
     job = payload.get("workflow_job") or {}
     labels = tuple(str(label).lower() for label in job.get("labels") or [])
-    missing = set(label.lower() for label in policy.required_labels) - set(labels)
+    missing = {label.lower() for label in policy.required_labels} - set(labels)
     if missing:
         return Decision(False, "required_labels_missing", repository=repository, labels=labels)
 
@@ -61,6 +59,8 @@ def decide(settings: Settings, payload: dict[str, Any], run_event: str | None = 
 
 def cache_slug(repository: str) -> str:
     parts = repository.split("/", 1)
-    if len(parts) != 2 or not all(part.replace("-", "").replace("_", "").isalnum() for part in parts):
+    if len(parts) != 2 or not all(
+        part.replace("-", "").replace("_", "").isalnum() for part in parts
+    ):
         raise ValueError("invalid repository name")
     return "/".join(parts)

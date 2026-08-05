@@ -34,7 +34,6 @@ def settings(database_path: str = ":memory:", shadow_mode: bool = False) -> Sett
         repositories={
             "OldOwner/example-app": RepositoryPolicy(github_installation="personal"),
         },
-
         profiles={"crossbuild-small": RunnerProfile()},
         database_path=database_path,
         shadow_mode=shadow_mode,

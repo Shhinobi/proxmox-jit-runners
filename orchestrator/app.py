@@ -146,9 +146,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         reason: str | None = Query(default=None),
         accepted: bool | None = Query(default=None),
     ) -> list[dict[str, object]]:
-        return await orchestrator.db.list_deliveries(
-            limit=limit, reason=reason, accepted=accepted
-        )
+        return await orchestrator.db.list_deliveries(limit=limit, reason=reason, accepted=accepted)
 
     @app.get("/api/v1/policies")
     async def api_policies() -> dict[str, object]:
@@ -171,9 +169,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         category: str | None = Query(default=None),
         min_id: int | None = Query(default=None),
     ) -> list[dict[str, object]]:
-        return orchestrator.events.list(
-            limit=limit, level=level, category=category, min_id=min_id
-        )
+        return orchestrator.events.list(limit=limit, level=level, category=category, min_id=min_id)
 
     @app.get("/api/v1/snapshot")
     async def api_snapshot(
@@ -359,7 +355,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body = await request.json()
             if isinstance(body, dict) and body.get("min_age_days") is not None:
                 min_age_days = int(body["min_age_days"])
-        except Exception:
+        except Exception:  # noqa: BLE001 - malformed body falls back to the default GC threshold
             min_age_days = None
         try:
             return await gc_orphan_cache(orchestrator, min_age_days=min_age_days)
@@ -373,6 +369,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Format: YYYYMMDD-N (manual) — deploy does not auto-hash assets.
     asset_version = "20260805-2"
     if ui_dir.is_dir():
+
         @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
         async def root_redirect() -> RedirectResponse:
             return RedirectResponse(url="/ui/", status_code=307)

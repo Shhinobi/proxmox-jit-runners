@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from pathlib import Path
@@ -27,16 +28,25 @@ def _events_persist_path(database_path: str) -> Path | None:
         return None
     return Path(database_path).resolve().parent / "events.jsonl"
 
+
 WEBHOOKS = Counter("runner_orchestrator_webhooks_total", "Webhook deliveries", ["result", "reason"])
-PROVISION = Histogram("runner_orchestrator_provision_seconds", "Runner provisioning duration", ["mode"])
-PROVISION_FAILURES = Counter("runner_orchestrator_provision_failures_total", "Provisioning failures", ["mode"])
+PROVISION = Histogram(
+    "runner_orchestrator_provision_seconds", "Runner provisioning duration", ["mode"]
+)
+PROVISION_FAILURES = Counter(
+    "runner_orchestrator_provision_failures_total", "Provisioning failures", ["mode"]
+)
 JOBS_FAILED = Counter(
     "runner_orchestrator_jobs_failed_total",
     "Jobs that exhausted retries and landed in terminal status=failed",
     ["mode"],
 )
-CLEANUP_FAILURES = Counter("runner_orchestrator_cleanup_failures_total", "Cleanup failures", ["mode"])
-ACTIVE = Gauge("runner_orchestrator_active_instances", "Active runner instances", ["mode", "status"])
+CLEANUP_FAILURES = Counter(
+    "runner_orchestrator_cleanup_failures_total", "Cleanup failures", ["mode"]
+)
+ACTIVE = Gauge(
+    "runner_orchestrator_active_instances", "Active runner instances", ["mode", "status"]
+)
 QUEUE = Gauge("runner_orchestrator_queue_depth", "Queued jobs")
 OLDEST_QUEUED = Gauge(
     "runner_orchestrator_oldest_queued_job_age_seconds",
@@ -108,9 +118,7 @@ class Orchestrator:
         detail: str | None = None,
         **context: Any,
     ) -> None:
-        event = self.events.emit(
-            level, category, message, detail=detail, **context
-        )
+        event = self.events.emit(level, category, message, detail=detail, **context)
         log_line = f"[{category}] {message}"
         if detail:
             log_line = f"{log_line} | {detail[:300]}"
@@ -143,13 +151,19 @@ class Orchestrator:
         action = str(payload.get("action", ""))
         repository = str(payload.get("repository", {}).get("full_name", ""))
         if event != "workflow_job":
-            inserted = await self.db.record_delivery(delivery_id, event, action, False, "event_ignored")
+            inserted = await self.db.record_delivery(
+                delivery_id, event, action, False, "event_ignored"
+            )
             WEBHOOKS.labels("duplicate" if not inserted else "ignored", "event_ignored").inc()
             return inserted, "event_ignored"
         resolved_repository = repository_policy(self.settings, repository)
         if resolved_repository is None:
-            inserted = await self.db.record_delivery(delivery_id, event, action, False, "repository_not_allowed")
-            WEBHOOKS.labels("duplicate" if not inserted else "rejected", "repository_not_allowed").inc()
+            inserted = await self.db.record_delivery(
+                delivery_id, event, action, False, "repository_not_allowed"
+            )
+            WEBHOOKS.labels(
+                "duplicate" if not inserted else "rejected", "repository_not_allowed"
+            ).inc()
             return inserted, "repository_not_allowed"
         installation = self._installation(resolved_repository[0])
         try:
@@ -167,8 +181,14 @@ class Orchestrator:
 
         if action == "queued":
             decision = decide(self.settings, payload)
-            reason = "shadow_mode" if decision.accepted and self.settings.shadow_mode else decision.reason
-            inserted = await self.db.record_delivery(delivery_id, event, action, decision.accepted, reason)
+            reason = (
+                "shadow_mode"
+                if decision.accepted and self.settings.shadow_mode
+                else decision.reason
+            )
+            inserted = await self.db.record_delivery(
+                delivery_id, event, action, decision.accepted, reason
+            )
             if not inserted:
                 WEBHOOKS.labels("duplicate", reason).inc()
                 return False, "duplicate"
@@ -205,11 +225,7 @@ class Orchestrator:
                 if by_job is not None:
                     bound_name = str(runner_name or "")
                     expected_warm = f"pve-lxc-warm-{by_job['vmid']}"
-                    if (
-                        by_job["mode"] == "warm"
-                        and bound_name
-                        and bound_name != expected_warm
-                    ):
+                    if by_job["mode"] == "warm" and bound_name and bound_name != expected_warm:
                         self.log(
                             "warn",
                             "job",
@@ -327,7 +343,9 @@ class Orchestrator:
             if mode == "persistent":
                 existing = await self.db.find_persistent(job["repository"])
                 if existing:
-                    await self.db.update_instance(existing["id"], "ready", job_id=job_id, last_used_at=int(time.time()))
+                    await self.db.update_instance(
+                        existing["id"], "ready", job_id=job_id, last_used_at=int(time.time())
+                    )
                     await self.db.set_job_status(
                         job_id,
                         "waiting_for_runner",
@@ -443,9 +461,7 @@ class Orchestrator:
         instance: dict[str, Any] | None = None
         runner_name = self._runner_name(mode, job_id)
         if mode in {"ephemeral", "pool"}:
-            instance = await self.db.claim_ready_pool(
-                repository, job_id, runner_name, mode=mode
-            )
+            instance = await self.db.claim_ready_pool(repository, job_id, runner_name, mode=mode)
         if instance:
             instance_id = int(instance["id"])
             vmid = int(instance["vmid"])
@@ -456,16 +472,14 @@ class Orchestrator:
                 mode, repository, job_id, runner_name, enforce_capacity=True
             )
             if reservation is None:
-                await self.db.set_job_status(
-                    job_id, "queued", error="capacity_exhausted"
-                )
+                await self.db.set_job_status(job_id, "queued", error="capacity_exhausted")
                 await asyncio.sleep(5)
                 return
             instance_id, vmid, ip_address = reservation
             await self.proxmox.clone(vmid, runner_name, ip_address, profile, mode, job_id)
 
         await self.broker.attach_cache(vmid, cache_slug(repository))
-        labels = sorted(set(str(label).lower() for label in decision.labels))
+        labels = sorted({str(label).lower() for label in decision.labels})
         credential: dict[str, object] = {
             "mode": mode,
             "runner_name": runner_name,
@@ -482,9 +496,7 @@ class Orchestrator:
                 installation, repository
             )
         else:
-            jit = await self.github.generate_jit(
-                installation, repository, runner_name, labels
-            )
+            jit = await self.github.generate_jit(installation, repository, runner_name, labels)
             credential["encoded_jit_config"] = str(jit["encoded_jit_config"])
 
         await self.proxmox.start(vmid)
@@ -532,7 +544,10 @@ class Orchestrator:
         enforce_capacity: bool,
     ) -> tuple[int, int, str] | None:
         async with self._allocation_lock:
-            if enforce_capacity and await self.db.count_active() >= self.settings.capacity.max_active:
+            if (
+                enforce_capacity
+                and await self.db.count_active() >= self.settings.capacity.max_active
+            ):
                 return None
             vmid, ip_address = await self._allocate()
             instance_id = await self.db.create_instance(
@@ -561,14 +576,10 @@ class Orchestrator:
         job = await self.db.get_job(job_id)
         now = int(time.time())
         if job:
-            await self.db.set_job_status(
-                job_id, "completed", completed_at=now, error=None
-            )
+            await self.db.set_job_status(job_id, "completed", completed_at=now, error=None)
         instance = await self.db.find_instance_by_job(job_id)
         if not instance and repository and runner_name:
-            candidate = await self.db.find_instance_by_runner(
-                repository, runner_name
-            )
+            candidate = await self.db.find_instance_by_runner(repository, runner_name)
             # A late completion must never tear down a newer job that reused the
             # deterministic warm runner name.
             if candidate and candidate.get("job_id") in {None, job_id}:
@@ -692,9 +703,7 @@ class Orchestrator:
                     if runner:
                         status = str(runner.get("status") or "").lower()
                         busy = bool(runner.get("busy", False))
-                        age = int(time.time()) - int(
-                            instance.get("updated_at") or time.time()
-                        )
+                        age = int(time.time()) - int(instance.get("updated_at") or time.time())
                         # Truly online+busy: job may still be executing — defer briefly.
                         if status == "online" and busy:
                             if age < 180:
@@ -815,12 +824,10 @@ class Orchestrator:
             except Exception as exc:
                 self.events.exception("reconcile", "reconciliation failed", exc)
                 LOGGER.exception("reconciliation failed")
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
                     self._stop.wait(), timeout=self.settings.capacity.reconcile_seconds
                 )
-            except TimeoutError:
-                pass
 
     async def _reconcile_stale_jobs(self, now: int) -> None:
         """Repair job rows left open by lost/racy lifecycle webhooks."""
@@ -968,8 +975,8 @@ class Orchestrator:
             if instance.get("status") != "running" or not instance.get("job_id"):
                 continue
             bound = int(instance["job_id"])
-            job = await self.db.get_job(bound)
-            if job is None or str(job.get("status")) in self.db.JOB_TERMINAL_STATUSES:
+            bound_job = await self.db.get_job(bound)
+            if bound_job is None or str(bound_job.get("status")) in self.db.JOB_TERMINAL_STATUSES:
                 age = now - int(instance.get("updated_at") or now)
                 if age < 60:
                     continue
@@ -1051,10 +1058,16 @@ class Orchestrator:
             if i.get("runner_name")
             and i.get("status") not in {"delete_pending", "delete_failed", "deleting"}
         }
-        for repository, policy in self.settings.repositories.items():
+        for repository, _policy in self.settings.repositories.items():
             try:
                 installation = self._installation(repository)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                self.log(
+                    "warn",
+                    "reconcile",
+                    f"skipping zombie-runner reconcile for {repository}: {exc}",
+                    repository=repository,
+                )
                 continue
             try:
                 runners = await self.github.list_runners(installation, repository)
@@ -1123,17 +1136,18 @@ class Orchestrator:
         for instance in instances:
             age = now - int(instance["updated_at"])
             idle = now - int(instance.get("last_used_at") or instance["updated_at"])
-            if instance["status"] == "delete_pending":
-                await self._destroy_instance(instance)
-            elif instance["status"] == "delete_failed" and age >= self._destroy_retry_backoff(
-                int(instance.get("delete_attempts") or 0)
+            if (
+                instance["status"] == "delete_pending"
+                or instance["status"] == "delete_failed"
+                and age >= self._destroy_retry_backoff(int(instance.get("delete_attempts") or 0))
+                or instance["status"] == "provisioning"
+                and age > self.settings.capacity.ready_timeout_seconds
+                or instance["status"] == "reserved"
+                and age > self.settings.capacity.ready_timeout_seconds
+                or instance["mode"] == "persistent"
+                and instance["status"] == "ready"
+                and idle > self.settings.capacity.persistent_idle_seconds
             ):
-                await self._destroy_instance(instance)
-            elif instance["status"] == "provisioning" and age > self.settings.capacity.ready_timeout_seconds:
-                await self._destroy_instance(instance)
-            elif instance["status"] == "reserved" and age > self.settings.capacity.ready_timeout_seconds:
-                await self._destroy_instance(instance)
-            elif instance["mode"] == "persistent" and instance["status"] == "ready" and idle > self.settings.capacity.persistent_idle_seconds:
                 await self._destroy_instance(instance)
             elif instance["mode"] == "warm" and instance["status"] in {
                 "ready",
@@ -1239,11 +1253,7 @@ class Orchestrator:
                 return
 
         # GH registration offline+busy with no agent → stuck Set up job.
-        if (
-            age >= 90
-            and runner_name
-            and instance.get("repository")
-        ):
+        if age >= 90 and runner_name and instance.get("repository"):
             try:
                 installation = self._installation(str(instance["repository"]))
                 runner = await self.github.find_runner(
@@ -1357,9 +1367,7 @@ class Orchestrator:
                 vmid=instance.get("vmid"),
                 repository=canonical_repo,
             )
-            LOGGER.exception(
-                "warm runner health check failed", extra={"vmid": instance["vmid"]}
-            )
+            LOGGER.exception("warm runner health check failed", extra={"vmid": instance["vmid"]})
 
     async def _replenish_pool(self) -> None:
         async with self._pool_lock:
@@ -1433,15 +1441,12 @@ class Orchestrator:
                 self.log(
                     "info",
                     "warm",
-                    f"scaling down idle warm {instance.get('runner_name')} "
-                    f"(target={target})",
+                    f"scaling down idle warm {instance.get('runner_name')} (target={target})",
                     vmid=instance.get("vmid"),
                     repository=repository,
                 )
 
-    async def _create_warm_runner(
-        self, repository: str, policy: RepositoryPolicy
-    ) -> bool:
+    async def _create_warm_runner(self, repository: str, policy: RepositoryPolicy) -> bool:
         started = time.monotonic()
         active = await self.db.count_active()
         max_active = self.settings.capacity.max_active
@@ -1484,25 +1489,17 @@ class Orchestrator:
         )
         try:
             profile = self.settings.profiles[policy.profile]
-            await self.proxmox.clone(
-                vmid, runner_name, ip_address, profile, "warm", None
-            )
+            await self.proxmox.clone(vmid, runner_name, ip_address, profile, "warm", None)
             await self.broker.attach_cache(vmid, cache_slug(repository))
             installation = self._installation(repository)
             labels = self._warm_labels(policy)
             # Stale GitHub runner registrations (e.g. after failed destroy) cause
             # generate-jitconfig 409 Already exists. Remove offline/idle leftovers.
-            stale = await self.github.find_runner(
-                installation, repository, runner_name
-            )
+            stale = await self.github.find_runner(installation, repository, runner_name)
             if stale:
                 if stale.get("busy", False):
-                    raise RuntimeError(
-                        f"GitHub runner {runner_name} still busy; cannot recreate"
-                    )
-                await self.github.delete_runner(
-                    installation, repository, int(stale["id"])
-                )
+                    raise RuntimeError(f"GitHub runner {runner_name} still busy; cannot recreate")
+                await self.github.delete_runner(installation, repository, int(stale["id"]))
                 self.log(
                     "warn",
                     "warm",
@@ -1511,9 +1508,7 @@ class Orchestrator:
                     runner_id=stale.get("id"),
                     repository=repository,
                 )
-            jit = await self.github.generate_jit(
-                installation, repository, runner_name, labels
-            )
+            jit = await self.github.generate_jit(installation, repository, runner_name, labels)
             credential: dict[str, object] = {
                 "mode": "warm",
                 "runner_name": runner_name,
@@ -1523,8 +1518,7 @@ class Orchestrator:
                 "encoded_jit_config": str(jit["encoded_jit_config"]),
                 "environment": runner_job_environment(
                     cargo_target_dir=(
-                        f"/cache/target/"
-                        f"{cache_slug(repository).replace('/', '-').lower()}-warm"
+                        f"/cache/target/{cache_slug(repository).replace('/', '-').lower()}-warm"
                     ),
                 ),
             }
@@ -1606,7 +1600,9 @@ class Orchestrator:
             instance = await self.db.get_instance(instance_id)
             if instance is None:
                 raise RuntimeError(f"warm runner {runner_name} disappeared from state")
-            if instance["status"] in {"reserved", "running", "delete_pending"} or instance.get("job_id"):
+            if instance["status"] in {"reserved", "running", "delete_pending"} or instance.get(
+                "job_id"
+            ):
                 return "claimed"
             runner = await self.github.find_runner(installation, repository, runner_name)
             if runner and runner.get("status") == "online":
@@ -1616,22 +1612,15 @@ class Orchestrator:
 
     @staticmethod
     def _warm_labels(policy: RepositoryPolicy) -> list[str]:
-        return sorted(
-            set(str(label).lower() for label in policy.required_labels)
-            | {"mode-ephemeral"}
-        )
+        return sorted({str(label).lower() for label in policy.required_labels} | {"mode-ephemeral"})
 
     @classmethod
-    def _warm_compatible(
-        cls, job: dict[str, Any], policy: RepositoryPolicy
-    ) -> bool:
-        requested = set(str(label).lower() for label in job.get("labels", []))
+    def _warm_compatible(cls, job: dict[str, Any], policy: RepositoryPolicy) -> bool:
+        requested = {str(label).lower() for label in job.get("labels", [])}
         return requested.issubset(set(cls._warm_labels(policy)))
 
     def _schedule_warm_replenishment(self) -> None:
-        task = asyncio.create_task(
-            self._replenish_warm_pool(), name="warm-runner-replenishment"
-        )
+        task = asyncio.create_task(self._replenish_warm_pool(), name="warm-runner-replenishment")
         self._background_tasks.add(task)
 
         def finished(completed: asyncio.Task[None]) -> None:
@@ -1706,13 +1695,9 @@ class Orchestrator:
             )
             stale = await self.github.find_runner(installation, repository, runner_name)
             if stale:
-                await self.github.delete_runner(
-                    installation, repository, int(stale["id"])
-                )
+                await self.github.delete_runner(installation, repository, int(stale["id"]))
             labels = self._warm_labels(policy)
-            jit = await self.github.generate_jit(
-                installation, repository, runner_name, labels
-            )
+            jit = await self.github.generate_jit(installation, repository, runner_name, labels)
             credential: dict[str, object] = {
                 "mode": "warm",
                 "runner_name": runner_name,
@@ -1722,8 +1707,7 @@ class Orchestrator:
                 "encoded_jit_config": str(jit["encoded_jit_config"]),
                 "environment": runner_job_environment(
                     cargo_target_dir=(
-                        f"/cache/target/"
-                        f"{cache_slug(repository).replace('/', '-').lower()}-warm"
+                        f"/cache/target/{cache_slug(repository).replace('/', '-').lower()}-warm"
                     ),
                 ),
             }
@@ -1763,7 +1747,7 @@ class Orchestrator:
                 duration_seconds=round(time.monotonic() - started, 1),
                 clean=clean_out[:120],
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - recorded below, caller falls back to destroy
             PROVISION_FAILURES.labels("warm_recycle").inc()
             self.events.exception(
                 "warm",
@@ -1798,9 +1782,7 @@ class Orchestrator:
             if not runner.get("busy", False):
                 return
             await asyncio.sleep(2)
-        raise TimeoutError(
-            f"GitHub runner {runner_name} still busy after {timeout_seconds}s"
-        )
+        raise TimeoutError(f"GitHub runner {runner_name} still busy after {timeout_seconds}s")
 
     async def _fail_warm_recycle(
         self,
@@ -1831,9 +1813,7 @@ class Orchestrator:
         )
 
     def _schedule_pool_replenishment(self) -> None:
-        task = asyncio.create_task(
-            self._replenish_pool(), name="global-pool-replenishment"
-        )
+        task = asyncio.create_task(self._replenish_pool(), name="global-pool-replenishment")
         self._background_tasks.add(task)
 
         def finished(completed: asyncio.Task[None]) -> None:
@@ -1865,12 +1845,17 @@ class Orchestrator:
                 self.settings.proxmox.api_token_file,
                 self.settings.broker.key_file,
             ]
-            checks["secrets"] = all(bool(Path(path).read_text(encoding="utf-8").strip()) for path in secret_paths)
+            # Blocking read, tracked for the secret-read caching work (modernization plan Fase 3).
+            checks["secrets"] = all(
+                bool(Path(path).read_text(encoding="utf-8").strip())  # noqa: ASYNC240
+                for path in secret_paths
+            )
             cache_checks = await asyncio.gather(
                 *(self.broker.cache_ready(repository) for repository in self.settings.repositories)
             )
             checks["cache"] = all(cache_checks)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("readiness check failed")
             checks["error"] = type(exc).__name__
         return all(checks.get(name) is True for name in ("database", "secrets", "cache")), checks
 

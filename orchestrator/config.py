@@ -51,7 +51,7 @@ class GitHubConfig:
     app_id: str
     private_key_file: str
     webhook_secret_file: str
-    installations: dict[str, "GitHubInstallation"]
+    installations: dict[str, GitHubInstallation]
     api_url: str = "https://api.github.com"
     api_version: str = "2022-11-28"
 
@@ -150,7 +150,9 @@ def _secret_override(value: str, env_name: str) -> str:
 
 
 def config_path(path: str | Path | None = None) -> Path:
-    return Path(path or os.environ.get("RUNNER_ORCHESTRATOR_CONFIG", "/etc/runner-orchestrator/config.yaml"))
+    return Path(
+        path or os.environ.get("RUNNER_ORCHESTRATOR_CONFIG", "/etc/runner-orchestrator/config.yaml")
+    )
 
 
 def repositories_override_path(settings_database_path: str | None = None) -> Path:
@@ -344,9 +346,13 @@ def parse_repository_policies(
         if installation is None:
             raise ConfigError(f"{repo}: unknown github_installation {policy.github_installation!r}")
         if installation.scope not in {"organization", "repository"}:
-            raise ConfigError(f"{repo}: GitHub installation scope must be organization or repository")
+            raise ConfigError(
+                f"{repo}: GitHub installation scope must be organization or repository"
+            )
         if owner.lower() != installation.account.lower():
-            raise ConfigError(f"{repo}: repository owner does not match GitHub installation account")
+            raise ConfigError(
+                f"{repo}: repository owner does not match GitHub installation account"
+            )
         if policy.default_mode not in policy.allowed_modes:
             raise ConfigError(f"{repo}: default_mode must be allowed")
         if policy.warm_capacity < 0:
@@ -382,7 +388,7 @@ def parse_repository_policies(
 
 
 def validate_repository_profiles(
-    repositories: dict[str, RepositoryPolicy], profiles: dict[str, "RunnerProfile"]
+    repositories: dict[str, RepositoryPolicy], profiles: dict[str, RunnerProfile]
 ) -> None:
     """Every repo's profile (and the pool-mode default) must be a defined profile.
 
@@ -475,15 +481,21 @@ def load_settings(path: str | Path | None = None) -> Settings:
         installations = parse_github_installations(gh_raw["installations"])
         github = GitHubConfig(
             app_id=_secret_override(str(gh_raw.get("app_id", "")), "GITHUB_APP_ID"),
-            private_key_file=_secret_override(str(gh_raw["private_key_file"]), "GITHUB_PRIVATE_KEY_FILE"),
-            webhook_secret_file=_secret_override(str(gh_raw["webhook_secret_file"]), "GITHUB_WEBHOOK_SECRET_FILE"),
+            private_key_file=_secret_override(
+                str(gh_raw["private_key_file"]), "GITHUB_PRIVATE_KEY_FILE"
+            ),
+            webhook_secret_file=_secret_override(
+                str(gh_raw["webhook_secret_file"]), "GITHUB_WEBHOOK_SECRET_FILE"
+            ),
             installations=installations,
             api_url=str(gh_raw.get("api_url", "https://api.github.com")).rstrip("/"),
             api_version=str(gh_raw.get("api_version", "2022-11-28")),
         )
         proxmox = ProxmoxConfig(
             endpoint=_secret_override(str(pve_raw["endpoint"]), "PROXMOX_VE_ENDPOINT").rstrip("/"),
-            api_token_file=_secret_override(str(pve_raw["api_token_file"]), "PROXMOX_API_TOKEN_FILE"),
+            api_token_file=_secret_override(
+                str(pve_raw["api_token_file"]), "PROXMOX_API_TOKEN_FILE"
+            ),
             node=str(pve_raw.get("node", "pve")),
             template_vmid=int(pve_raw.get("template_vmid", 9101)),
             storage=str(pve_raw.get("storage", "local-lvm")),
@@ -511,7 +523,9 @@ def load_settings(path: str | Path | None = None) -> Settings:
         ),
     )
     cache = CacheConfig(**raw.get("cache", {}))
-    base_capacity = parse_capacity_config(raw.get("capacity") if isinstance(raw.get("capacity"), dict) else {})
+    base_capacity = parse_capacity_config(
+        raw.get("capacity") if isinstance(raw.get("capacity"), dict) else {}
+    )
     capacity = parse_capacity_config(override_capacity, base=base_capacity)
     if not github.installations:
         raise ConfigError("at least one GitHub installation is required")

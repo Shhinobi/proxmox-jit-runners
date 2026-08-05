@@ -25,7 +25,9 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["version"], len(MIGRATIONS))
 
     async def test_initialize_is_idempotent(self) -> None:
-        await self.db.create_instance(5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app")
+        await self.db.create_instance(
+            5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app"
+        )
         await self.db.initialize()  # re-running must not fail or reset data
         instances = await self.db.list_instances()
         self.assertEqual(len(instances), 1)
@@ -65,15 +67,17 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         row = await legacy_db._fetchone("SELECT version FROM schema_version")
         assert row is not None
         self.assertEqual(row["version"], len(MIGRATIONS))
-        columns = {
-            c["name"] for c in await legacy_db._fetchall("PRAGMA table_info(instances)")
-        }
+        columns = {c["name"] for c in await legacy_db._fetchall("PRAGMA table_info(instances)")}
         self.assertIn("use_count", columns)
         self.assertIn("delete_attempts", columns)
 
     async def test_delivery_is_idempotent(self) -> None:
-        self.assertTrue(await self.db.record_delivery("delivery-1", "workflow_job", "queued", True, "accepted"))
-        self.assertFalse(await self.db.record_delivery("delivery-1", "workflow_job", "queued", True, "accepted"))
+        self.assertTrue(
+            await self.db.record_delivery("delivery-1", "workflow_job", "queued", True, "accepted")
+        )
+        self.assertFalse(
+            await self.db.record_delivery("delivery-1", "workflow_job", "queued", True, "accepted")
+        )
 
     async def test_list_jobs_omits_payload_and_parses_labels(self) -> None:
         payload = {
@@ -92,7 +96,9 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             jobs[0]["github_job_url"],
             "https://github.com/OldOwner/example-app/actions/runs/8/job/99",
         )
-        filtered = await self.db.list_jobs(limit=10, repository="OldOwner/example-app", mode="ephemeral")
+        filtered = await self.db.list_jobs(
+            limit=10, repository="OldOwner/example-app", mode="ephemeral"
+        )
         self.assertEqual(len(filtered), 1)
         empty = await self.db.list_jobs(limit=10, repository="OldOwner/Other")
         self.assertEqual(empty, [])
@@ -127,7 +133,9 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(filtered[0]["vmid"], 5100)
 
     async def test_schedule_ready_recycle_marks_pool_and_warm(self) -> None:
-        await self.db.create_instance(5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app")
+        await self.db.create_instance(
+            5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app"
+        )
         await self.db.create_instance(5001, "10.0.0.101", "pool", "ready")
         result = await self.db.schedule_ready_recycle()
         self.assertEqual(result["scheduled"], 2)
@@ -135,16 +143,26 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(statuses, {(5000, "delete_pending"), (5001, "delete_pending")})
 
     async def test_schedule_ready_recycle_refuses_busy_pool_or_warm_instances(self) -> None:
-        await self.db.create_instance(5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app")
-        await self.db.create_instance(5001, "10.0.0.101", "warm", "provisioning", "OldOwner/example-app")
+        await self.db.create_instance(
+            5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app"
+        )
+        await self.db.create_instance(
+            5001, "10.0.0.101", "warm", "provisioning", "OldOwner/example-app"
+        )
         with self.assertRaises(RuntimeError):
             await self.db.schedule_ready_recycle()
 
     async def test_schedule_ready_recycle_ignores_busy_ephemeral_or_persistent(self) -> None:
         """A busy job elsewhere in the fleet must not block recycling pool/warm supply."""
-        await self.db.create_instance(5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app")
-        await self.db.create_instance(5001, "10.0.0.101", "ephemeral", "running", "OldOwner/example-app", 9)
-        await self.db.create_instance(5002, "10.0.0.102", "persistent", "ready", "OldOwner/example-app")
+        await self.db.create_instance(
+            5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app"
+        )
+        await self.db.create_instance(
+            5001, "10.0.0.101", "ephemeral", "running", "OldOwner/example-app", 9
+        )
+        await self.db.create_instance(
+            5002, "10.0.0.102", "persistent", "ready", "OldOwner/example-app"
+        )
 
         result = await self.db.schedule_ready_recycle()
 
@@ -156,7 +174,9 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(statuses[5002], "ready")
 
     async def test_list_deliveries_returns_newest_first(self) -> None:
-        await self.db.record_delivery("d-old", "workflow_job", "queued", False, "repository_not_allowed")
+        await self.db.record_delivery(
+            "d-old", "workflow_job", "queued", False, "repository_not_allowed"
+        )
         await self.db.record_delivery("d-new", "workflow_job", "queued", True, "accepted")
         deliveries = await self.db.list_deliveries(limit=10)
         self.assertGreaterEqual(len(deliveries), 2)
@@ -183,12 +203,12 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(await self.db.find_persistent("OldOwner/example-app"))
         await self.db.update_instance(instance_id, "ready", job_id=None)
-        self.assertEqual((await self.db.find_persistent("OldOwner/example-app"))["id"], instance_id)
+        self.assertEqual(
+            (await self.db.find_persistent("OldOwner/example-app"))["id"], instance_id
+        )
 
     async def test_instance_transition_requires_expected_status(self) -> None:
-        instance_id = await self.db.create_instance(
-            5000, "10.0.0.100", "warm", "provisioning"
-        )
+        instance_id = await self.db.create_instance(5000, "10.0.0.100", "warm", "provisioning")
 
         changed = await self.db.transition_instance(
             instance_id, {"provisioning"}, "running", job_id=42
@@ -204,9 +224,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(instance["job_id"], 42)
 
     async def test_pool_claim_can_adopt_ephemeral_lifecycle(self) -> None:
-        await self.db.create_instance(
-            5000, "10.0.0.100", "pool", "ready"
-        )
+        await self.db.create_instance(5000, "10.0.0.100", "pool", "ready")
 
         claimed = await self.db.claim_ready_pool(
             "OldOwner/example-app", 42, "pve-lxc-ephemeral-42", mode="ephemeral"
@@ -252,16 +270,10 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db.count_warm_supply("OldOwner/example-app"), 0)
 
     async def test_global_pool_instance_can_only_be_claimed_once(self) -> None:
-        await self.db.create_instance(
-            5000, "10.0.0.100", "pool", "ready"
-        )
+        await self.db.create_instance(5000, "10.0.0.100", "pool", "ready")
         claims = await asyncio.gather(
-            self.db.claim_ready_pool(
-                "OldOwner/example-app", 42, "pve-lxc-pool-42"
-            ),
-            self.db.claim_ready_pool(
-                "AcmeOrg/OtherProject", 43, "pve-lxc-pool-43"
-            ),
+            self.db.claim_ready_pool("OldOwner/example-app", 42, "pve-lxc-pool-42"),
+            self.db.claim_ready_pool("AcmeOrg/OtherProject", 43, "pve-lxc-pool-43"),
         )
         claimed = [claim for claim in claims if claim is not None]
         self.assertEqual(len(claimed), 1)

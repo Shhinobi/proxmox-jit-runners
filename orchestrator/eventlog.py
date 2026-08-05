@@ -100,9 +100,7 @@ class EventLog:
         if level not in {"debug", "info", "warn", "error"}:
             level = "info"
         clean_context = {
-            key: value
-            for key, value in context.items()
-            if value is not None and value != ""
+            key: value for key, value in context.items() if value is not None and value != ""
         }
         with self._lock:
             self._seq += 1
@@ -126,9 +124,7 @@ class EventLog:
         exc: BaseException,
         **context: Any,
     ) -> dict[str, Any]:
-        detail = "".join(
-            traceback.format_exception(type(exc), exc, exc.__traceback__)
-        )[-4000:]
+        detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:]
         return self.emit(
             "error",
             category,
@@ -161,9 +157,7 @@ class EventLog:
                 items = [item for item in items if item["level"] == wanted]
         if category:
             wanted_cat = str(category).lower()
-            items = [
-                item for item in items if str(item.get("category", "")).lower() == wanted_cat
-            ]
+            items = [item for item in items if str(item.get("category", "")).lower() == wanted_cat]
         # newest first
         items.reverse()
         return items[:limit]
