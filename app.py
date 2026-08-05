@@ -371,7 +371,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ui_dir = ui_directory()
     # Bump on every UI-facing change so browsers drop stale app.js/styles.css.
     # Format: YYYYMMDD-N (manual) — deploy does not auto-hash assets.
-    asset_version = "20260720-1"
+    asset_version = "20260805-2"
     if ui_dir.is_dir():
         @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
         async def root_redirect() -> RedirectResponse:
