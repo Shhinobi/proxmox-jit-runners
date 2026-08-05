@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import unittest
+import pytest
 
 from orchestrator.config import (
     CapacityConfig,
@@ -28,239 +28,207 @@ def payload(labels: list[str] | None = None) -> dict[str, object]:
     }
 
 
-class PolicyTests(unittest.TestCase):
-    def test_default_ephemeral_mode_is_accepted(self) -> None:
-        decision = decide(settings(), payload(), "push")
-        self.assertTrue(decision.accepted)
-        self.assertEqual(decision.mode, "ephemeral")
-
-    def test_explicit_pool_mode_is_accepted(self) -> None:
-        decision = decide(
-            settings(),
-            payload(["self-hosted", "proxmox-lxc", "crossbuild", "mode-pool"]),
-            "workflow_dispatch",
-        )
-        self.assertTrue(decision.accepted)
-        self.assertEqual(decision.mode, "pool")
-
-    def test_repository_name_is_case_insensitive(self) -> None:
-        case_variant = payload()
-        case_variant["repository"] = {"full_name": "OldOwner/example-app"}
-        decision = decide(settings(), case_variant, "push")
-        self.assertTrue(decision.accepted)
-        self.assertEqual(decision.repository, "OldOwner/example-app")
-
-    def test_untrusted_pull_request_event_is_rejected(self) -> None:
-        self.assertEqual(decide(settings(), payload(), "pull_request").reason, "event_not_allowed")
-
-    def test_missing_required_label_is_rejected(self) -> None:
-        self.assertEqual(
-            decide(settings(), payload(["self-hosted"]), "push").reason, "required_labels_missing"
-        )
-
-    def test_unknown_repository_is_rejected(self) -> None:
-        other = payload()
-        other["repository"] = {"full_name": "OldOwner/OtherRepo"}
-        decision = decide(settings(), other, "push")
-        self.assertFalse(decision.accepted)
-        self.assertEqual(decision.reason, "repository_not_allowed")
-
-    def test_retired_temp_repository_is_rejected(self) -> None:
-        temp = payload()
-        temp["repository"] = {"full_name": "OldOwner/example-app-Temp"}
-        decision = decide(settings(), temp, "workflow_dispatch")
-        self.assertFalse(decision.accepted)
-        self.assertEqual(decision.reason, "repository_not_allowed")
-
-    def test_cache_slug_rejects_path_traversal(self) -> None:
-        with self.assertRaises(ValueError):
-            cache_slug("OldOwner/../example-app")
+def test_default_ephemeral_mode_is_accepted() -> None:
+    decision = decide(settings(), payload(), "push")
+    assert decision.accepted
+    assert decision.mode == "ephemeral"
 
 
-class CapacityBudgetTests(unittest.TestCase):
-    def test_rejects_warm_plus_pool_over_max_active(self) -> None:
-        capacity = CapacityConfig(max_active=3, pool_size=2)
-        repositories = {
-            "a/repo": RepositoryPolicy(warm_capacity=2),
+def test_explicit_pool_mode_is_accepted() -> None:
+    decision = decide(
+        settings(),
+        payload(["self-hosted", "proxmox-lxc", "crossbuild", "mode-pool"]),
+        "workflow_dispatch",
+    )
+    assert decision.accepted
+    assert decision.mode == "pool"
+
+
+def test_repository_name_is_case_insensitive() -> None:
+    case_variant = payload()
+    case_variant["repository"] = {"full_name": "OldOwner/example-app"}
+    decision = decide(settings(), case_variant, "push")
+    assert decision.accepted
+    assert decision.repository == "OldOwner/example-app"
+
+
+def test_untrusted_pull_request_event_is_rejected() -> None:
+    assert decide(settings(), payload(), "pull_request").reason == "event_not_allowed"
+
+
+def test_missing_required_label_is_rejected() -> None:
+    assert decide(settings(), payload(["self-hosted"]), "push").reason == "required_labels_missing"
+
+
+def test_unknown_repository_is_rejected() -> None:
+    other = payload()
+    other["repository"] = {"full_name": "OldOwner/OtherRepo"}
+    decision = decide(settings(), other, "push")
+    assert not decision.accepted
+    assert decision.reason == "repository_not_allowed"
+
+
+def test_retired_temp_repository_is_rejected() -> None:
+    temp = payload()
+    temp["repository"] = {"full_name": "OldOwner/example-app-Temp"}
+    decision = decide(settings(), temp, "workflow_dispatch")
+    assert not decision.accepted
+    assert decision.reason == "repository_not_allowed"
+
+
+def test_cache_slug_rejects_path_traversal() -> None:
+    with pytest.raises(ValueError):
+        cache_slug("OldOwner/../example-app")
+
+
+def test_rejects_warm_plus_pool_over_max_active() -> None:
+    capacity = CapacityConfig(max_active=3, pool_size=2)
+    repositories = {"a/repo": RepositoryPolicy(warm_capacity=2)}
+    with pytest.raises(ConfigError):
+        validate_capacity_budget(capacity, repositories)
+
+
+def test_accepts_warm_plus_pool_within_max_active() -> None:
+    capacity = CapacityConfig(max_active=4, pool_size=1)
+    repositories = {
+        "a/repo": RepositoryPolicy(warm_capacity=1),
+        "b/repo": RepositoryPolicy(warm_capacity=2),
+    }
+    validate_capacity_budget(capacity, repositories)  # must not raise
+
+
+@pytest.fixture
+def installations() -> dict[str, GitHubInstallation]:
+    return {
+        "personal": GitHubInstallation(account="OldOwner", installation_id=1, scope="repository")
+    }
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_error"),
+    [
+        pytest.param({"max_concurrent": -1}, ConfigError, id="rejects_negative_max_concurrent"),
+        pytest.param(
+            {"warm_capacity": 3, "max_concurrent": 1},
+            ConfigError,
+            id="rejects_max_concurrent_below_warm_capacity",
+        ),
+        pytest.param(
+            {"warm_capacity": 1, "max_concurrent": 2}, None, id="accepts_valid_max_concurrent"
+        ),
+        pytest.param({"warm_capacity": 5}, None, id="zero_max_concurrent_means_unlimited"),
+    ],
+)
+def test_max_concurrent_validation(
+    installations: dict[str, GitHubInstallation],
+    overrides: dict[str, object],
+    expected_error: type[Exception] | None,
+) -> None:
+    raw = {"OldOwner/example-app": {"github_installation": "personal", **overrides}}
+    if expected_error is not None:
+        with pytest.raises(expected_error):
+            parse_repository_policies(raw, installations)
+        return
+    parsed = parse_repository_policies(raw, installations)
+    expected_max_concurrent = overrides.get("max_concurrent", 0)
+    assert parsed["OldOwner/example-app"].max_concurrent == expected_max_concurrent
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_error", "expected"),
+    [
+        pytest.param(
+            {"warm_capacity": 4},
+            None,
+            {"warm_idle_capacity": -1, "warm_idle_after_seconds": 0},
+            id="disabled_by_default",
+        ),
+        pytest.param(
+            {"warm_capacity": 4, "warm_idle_capacity": 1, "warm_idle_after_seconds": 3600},
+            None,
+            {"warm_idle_capacity": 1, "warm_idle_after_seconds": 3600},
+            id="accepts_valid_idle_scaling_config",
+        ),
+        pytest.param(
+            {"warm_capacity": 2, "warm_idle_capacity": 3, "warm_idle_after_seconds": 60},
+            ConfigError,
+            None,
+            id="rejects_idle_capacity_above_warm_capacity",
+        ),
+        pytest.param(
+            {"warm_capacity": 4, "warm_idle_capacity": 1},
+            ConfigError,
+            None,
+            id="rejects_idle_capacity_without_idle_seconds",
+        ),
+        pytest.param(
+            {"warm_capacity": 4, "warm_idle_capacity": -2},
+            ConfigError,
+            None,
+            id="rejects_below_minus_one",
+        ),
+    ],
+)
+def test_warm_idle_capacity_validation(
+    installations: dict[str, GitHubInstallation],
+    overrides: dict[str, object],
+    expected_error: type[Exception] | None,
+    expected: dict[str, object] | None,
+) -> None:
+    raw = {"OldOwner/example-app": {"github_installation": "personal", **overrides}}
+    if expected_error is not None:
+        with pytest.raises(expected_error):
+            parse_repository_policies(raw, installations)
+        return
+    policy = parse_repository_policies(raw, installations)["OldOwner/example-app"]
+    assert expected is not None
+    assert policy.warm_idle_capacity == expected["warm_idle_capacity"]
+    assert policy.warm_idle_after_seconds == expected["warm_idle_after_seconds"]
+
+
+def test_defaults_to_crossbuild_small(installations: dict[str, GitHubInstallation]) -> None:
+    raw = {"OldOwner/example-app": {"github_installation": "personal"}}
+    parsed = parse_repository_policies(raw, installations)
+    assert parsed["OldOwner/example-app"].profile == "crossbuild-small"
+
+
+def test_accepts_custom_profile_name(installations: dict[str, GitHubInstallation]) -> None:
+    raw = {
+        "OldOwner/example-app": {
+            "github_installation": "personal",
+            "profile": "crossbuild-large",
         }
-        with self.assertRaises(ConfigError):
-            validate_capacity_budget(capacity, repositories)
-
-    def test_accepts_warm_plus_pool_within_max_active(self) -> None:
-        capacity = CapacityConfig(max_active=4, pool_size=1)
-        repositories = {
-            "a/repo": RepositoryPolicy(warm_capacity=1),
-            "b/repo": RepositoryPolicy(warm_capacity=2),
-        }
-        validate_capacity_budget(capacity, repositories)  # must not raise
+    }
+    parsed = parse_repository_policies(raw, installations)
+    assert parsed["OldOwner/example-app"].profile == "crossbuild-large"
 
 
-class RepositoryPolicyMaxConcurrentTests(unittest.TestCase):
-    def _installations(self) -> dict[str, GitHubInstallation]:
-        return {
-            "personal": GitHubInstallation(
-                account="OldOwner", installation_id=1, scope="repository"
-            )
-        }
-
-    def test_rejects_negative_max_concurrent(self) -> None:
-        raw = {
-            "OldOwner/example-app": {
-                "github_installation": "personal",
-                "max_concurrent": -1,
-            }
-        }
-        with self.assertRaises(ConfigError):
-            parse_repository_policies(raw, self._installations())
-
-    def test_rejects_max_concurrent_below_warm_capacity(self) -> None:
-        raw = {
-            "OldOwner/example-app": {
-                "github_installation": "personal",
-                "warm_capacity": 3,
-                "max_concurrent": 1,
-            }
-        }
-        with self.assertRaises(ConfigError):
-            parse_repository_policies(raw, self._installations())
-
-    def test_accepts_valid_max_concurrent(self) -> None:
-        raw = {
-            "OldOwner/example-app": {
-                "github_installation": "personal",
-                "warm_capacity": 1,
-                "max_concurrent": 2,
-            }
-        }
-        parsed = parse_repository_policies(raw, self._installations())
-        self.assertEqual(parsed["OldOwner/example-app"].max_concurrent, 2)
-
-    def test_zero_max_concurrent_means_unlimited(self) -> None:
-        raw = {
-            "OldOwner/example-app": {
-                "github_installation": "personal",
-                "warm_capacity": 5,
-            }
-        }
-        parsed = parse_repository_policies(raw, self._installations())
-        self.assertEqual(parsed["OldOwner/example-app"].max_concurrent, 0)
+def test_rejects_empty_profile(installations: dict[str, GitHubInstallation]) -> None:
+    raw = {"OldOwner/example-app": {"github_installation": "personal", "profile": "  "}}
+    with pytest.raises(ConfigError):
+        parse_repository_policies(raw, installations)
 
 
-class WarmIdleCapacityValidationTests(unittest.TestCase):
-    def _installations(self) -> dict[str, GitHubInstallation]:
-        return {
-            "personal": GitHubInstallation(
-                account="OldOwner", installation_id=1, scope="repository"
-            )
-        }
-
-    def test_disabled_by_default(self) -> None:
-        raw = {
-            "OldOwner/example-app": {
-                "github_installation": "personal",
-                "warm_capacity": 4,
-            }
-        }
-        parsed = parse_repository_policies(raw, self._installations())
-        policy = parsed["OldOwner/example-app"]
-        self.assertEqual(policy.warm_idle_capacity, -1)
-        self.assertEqual(policy.warm_idle_after_seconds, 0)
-
-    def test_accepts_valid_idle_scaling_config(self) -> None:
-        raw = {
-            "OldOwner/example-app": {
-                "github_installation": "personal",
-                "warm_capacity": 4,
-                "warm_idle_capacity": 1,
-                "warm_idle_after_seconds": 3600,
-            }
-        }
-        parsed = parse_repository_policies(raw, self._installations())
-        policy = parsed["OldOwner/example-app"]
-        self.assertEqual(policy.warm_idle_capacity, 1)
-        self.assertEqual(policy.warm_idle_after_seconds, 3600)
-
-    def test_rejects_idle_capacity_above_warm_capacity(self) -> None:
-        raw = {
-            "OldOwner/example-app": {
-                "github_installation": "personal",
-                "warm_capacity": 2,
-                "warm_idle_capacity": 3,
-                "warm_idle_after_seconds": 60,
-            }
-        }
-        with self.assertRaises(ConfigError):
-            parse_repository_policies(raw, self._installations())
-
-    def test_rejects_idle_capacity_without_idle_seconds(self) -> None:
-        raw = {
-            "OldOwner/example-app": {
-                "github_installation": "personal",
-                "warm_capacity": 4,
-                "warm_idle_capacity": 1,
-            }
-        }
-        with self.assertRaises(ConfigError):
-            parse_repository_policies(raw, self._installations())
-
-    def test_rejects_below_minus_one(self) -> None:
-        raw = {
-            "OldOwner/example-app": {
-                "github_installation": "personal",
-                "warm_capacity": 4,
-                "warm_idle_capacity": -2,
-            }
-        }
-        with self.assertRaises(ConfigError):
-            parse_repository_policies(raw, self._installations())
+def test_validate_repository_profiles_requires_default_profile() -> None:
+    repositories = {"a/repo": RepositoryPolicy()}
+    with pytest.raises(ConfigError):
+        validate_repository_profiles(repositories, {})
 
 
-class RepositoryProfileValidationTests(unittest.TestCase):
-    def _installations(self) -> dict[str, GitHubInstallation]:
-        return {
-            "personal": GitHubInstallation(
-                account="OldOwner", installation_id=1, scope="repository"
-            )
-        }
+def test_validate_repository_profiles_rejects_unknown_profile() -> None:
+    repositories = {"a/repo": RepositoryPolicy(profile="does-not-exist")}
+    profiles = {"crossbuild-small": RunnerProfile()}
+    with pytest.raises(ConfigError):
+        validate_repository_profiles(repositories, profiles)
 
-    def test_defaults_to_crossbuild_small(self) -> None:
-        raw = {"OldOwner/example-app": {"github_installation": "personal"}}
-        parsed = parse_repository_policies(raw, self._installations())
-        self.assertEqual(parsed["OldOwner/example-app"].profile, "crossbuild-small")
 
-    def test_accepts_custom_profile_name(self) -> None:
-        raw = {
-            "OldOwner/example-app": {
-                "github_installation": "personal",
-                "profile": "crossbuild-large",
-            }
-        }
-        parsed = parse_repository_policies(raw, self._installations())
-        self.assertEqual(parsed["OldOwner/example-app"].profile, "crossbuild-large")
-
-    def test_rejects_empty_profile(self) -> None:
-        raw = {"OldOwner/example-app": {"github_installation": "personal", "profile": "  "}}
-        with self.assertRaises(ConfigError):
-            parse_repository_policies(raw, self._installations())
-
-    def test_validate_repository_profiles_requires_default_profile(self) -> None:
-        repositories = {"a/repo": RepositoryPolicy()}
-        with self.assertRaises(ConfigError):
-            validate_repository_profiles(repositories, {})
-
-    def test_validate_repository_profiles_rejects_unknown_profile(self) -> None:
-        repositories = {"a/repo": RepositoryPolicy(profile="does-not-exist")}
-        profiles = {"crossbuild-small": RunnerProfile()}
-        with self.assertRaises(ConfigError):
-            validate_repository_profiles(repositories, profiles)
-
-    def test_validate_repository_profiles_accepts_known_profiles(self) -> None:
-        repositories = {
-            "a/repo": RepositoryPolicy(profile="crossbuild-small"),
-            "b/repo": RepositoryPolicy(profile="crossbuild-large"),
-        }
-        profiles = {
-            "crossbuild-small": RunnerProfile(),
-            "crossbuild-large": RunnerProfile(cores=12),
-        }
-        validate_repository_profiles(repositories, profiles)  # must not raise
+def test_validate_repository_profiles_accepts_known_profiles() -> None:
+    repositories = {
+        "a/repo": RepositoryPolicy(profile="crossbuild-small"),
+        "b/repo": RepositoryPolicy(profile="crossbuild-large"),
+    }
+    profiles = {
+        "crossbuild-small": RunnerProfile(),
+        "crossbuild-large": RunnerProfile(cores=12),
+    }
+    validate_repository_profiles(repositories, profiles)  # must not raise

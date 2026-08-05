@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import unittest
 from typing import Any
 from unittest import mock
 
 import httpx
+import pytest
 
 from orchestrator.config import GitHubConfig, GitHubInstallation
 from orchestrator.github import GitHubClient, GitHubError
@@ -38,52 +38,45 @@ class RecordingGitHubClient(GitHubClient):
         return {"token": "registration"}
 
 
-class GitHubScopeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_personal_repository_uses_repository_endpoint(self) -> None:
-        client = RecordingGitHubClient()
-        installation = GitHubInstallation("OldOwner", 1234567, "repository")
+async def test_personal_repository_uses_repository_endpoint() -> None:
+    client = RecordingGitHubClient()
+    installation = GitHubInstallation("OldOwner", 1234567, "repository")
+    await client.generate_jit(installation, "OldOwner/example-app", "runner-1", ["crossbuild"])
+    assert (
+        client.calls[0][2] == "/repos/OldOwner/example-app/actions/runners/generate-jitconfig"
+    )
+    assert (
+        client.runner_url(installation, "OldOwner/example-app")
+        == "https://github.com/OldOwner/example-app"
+    )
+
+
+async def test_organization_uses_org_endpoint_and_group() -> None:
+    client = RecordingGitHubClient()
+    installation = GitHubInstallation("AcmeOrg", 200, "organization", runner_group_id=7)
+    await client.generate_jit(installation, "AcmeOrg/Project", "runner-2", ["crossbuild"])
+    assert client.calls[0][2] == "/orgs/AcmeOrg/actions/runners/generate-jitconfig"
+    assert client.calls[0][3]["runner_group_id"] == 7
+    assert client.runner_url(installation, "AcmeOrg/Project") == "https://github.com/AcmeOrg"
+
+
+async def test_runner_lookup_and_delete_use_repository_scope() -> None:
+    client = RecordingGitHubClient()
+    installation = GitHubInstallation("OldOwner", 1234567, "repository")
+    runner = await client.find_runner(installation, "OldOwner/example-app", "runner-1")
+    assert runner["id"] == 10
+    await client.delete_runner(installation, "OldOwner/example-app", int(runner["id"]))
+    assert client.calls[-1][2] == "/repos/OldOwner/example-app/actions/runners/10"
+
+
+async def test_generate_jit_rejects_missing_encoded_config() -> None:
+    client = RecordingGitHubClient(jit_payload={})
+    installation = GitHubInstallation("acme", 1234567, "repository")
+    with pytest.raises(GitHubError) as ctx:
         await client.generate_jit(
-            installation, "OldOwner/example-app", "runner-1", ["crossbuild"]
+            installation, "acme/example-app", "runner-1", ["crossbuild"]
         )
-        self.assertEqual(
-            client.calls[0][2],
-            "/repos/OldOwner/example-app/actions/runners/generate-jitconfig",
-        )
-        self.assertEqual(
-            client.runner_url(installation, "OldOwner/example-app"),
-            "https://github.com/OldOwner/example-app",
-        )
-
-    async def test_organization_uses_org_endpoint_and_group(self) -> None:
-        client = RecordingGitHubClient()
-        installation = GitHubInstallation("AcmeOrg", 200, "organization", runner_group_id=7)
-        await client.generate_jit(installation, "AcmeOrg/Project", "runner-2", ["crossbuild"])
-        self.assertEqual(client.calls[0][2], "/orgs/AcmeOrg/actions/runners/generate-jitconfig")
-        self.assertEqual(client.calls[0][3]["runner_group_id"], 7)
-        self.assertEqual(
-            client.runner_url(installation, "AcmeOrg/Project"),
-            "https://github.com/AcmeOrg",
-        )
-
-    async def test_runner_lookup_and_delete_use_repository_scope(self) -> None:
-        client = RecordingGitHubClient()
-        installation = GitHubInstallation("OldOwner", 1234567, "repository")
-        runner = await client.find_runner(installation, "OldOwner/example-app", "runner-1")
-        self.assertEqual(runner["id"], 10)
-        await client.delete_runner(installation, "OldOwner/example-app", int(runner["id"]))
-        self.assertEqual(
-            client.calls[-1][2],
-            "/repos/OldOwner/example-app/actions/runners/10",
-        )
-
-    async def test_generate_jit_rejects_missing_encoded_config(self) -> None:
-        client = RecordingGitHubClient(jit_payload={})
-        installation = GitHubInstallation("acme", 1234567, "repository")
-        with self.assertRaises(GitHubError) as ctx:
-            await client.generate_jit(
-                installation, "acme/example-app", "runner-1", ["crossbuild"]
-            )
-        self.assertIn("encoded_jit_config", str(ctx.exception))
+    assert "encoded_jit_config" in str(ctx.value)
 
 
 def _plain_client() -> GitHubClient:
@@ -97,66 +90,68 @@ def _plain_client() -> GitHubClient:
     )
 
 
-class GitHubRetryTests(unittest.IsolatedAsyncioTestCase):
-    """Exercises the real request() retry/backoff, not the RecordingGitHubClient override."""
+# The following exercise the real request() retry/backoff, not RecordingGitHubClient's override.
 
-    async def test_retries_transient_network_error_then_succeeds(self) -> None:
-        client = _plain_client()
-        installation = GitHubInstallation("Acme", 1, "organization")
-        responses: list[Any] = [httpx.ConnectError("boom"), httpx.Response(200, json={"ok": True})]
 
-        async def fake_request(*_args: Any, **_kwargs: Any) -> httpx.Response:
-            result = responses.pop(0)
-            if isinstance(result, Exception):
-                raise result
-            return result
+async def test_retries_transient_network_error_then_succeeds() -> None:
+    client = _plain_client()
+    installation = GitHubInstallation("Acme", 1, "organization")
+    responses: list[Any] = [httpx.ConnectError("boom"), httpx.Response(200, json={"ok": True})]
 
-        with (
-            mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="tok")),
-            mock.patch.object(httpx.AsyncClient, "request", side_effect=fake_request),
-            mock.patch("orchestrator.github.asyncio.sleep", mock.AsyncMock()),
-        ):
-            data = await client.request(installation, "GET", "/foo", base_delay=0)
+    async def fake_request(*_args: Any, **_kwargs: Any) -> httpx.Response:
+        result = responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
-        self.assertEqual(data, {"ok": True})
-        self.assertEqual(responses, [])
+    with (
+        mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="tok")),
+        mock.patch.object(httpx.AsyncClient, "request", side_effect=fake_request),
+        mock.patch("orchestrator.github.asyncio.sleep", mock.AsyncMock()),
+    ):
+        data = await client.request(installation, "GET", "/foo", base_delay=0)
 
-    async def test_does_not_retry_client_error(self) -> None:
-        client = _plain_client()
-        installation = GitHubInstallation("Acme", 1, "organization")
-        calls = 0
+    assert data == {"ok": True}
+    assert responses == []
 
-        async def fake_request(*_args: Any, **_kwargs: Any) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            return httpx.Response(404, json={"message": "not found"})
 
-        with (
-            mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="tok")),
-            mock.patch.object(httpx.AsyncClient, "request", side_effect=fake_request),
-            self.assertRaises(GitHubError) as ctx,
-        ):
-            await client.request(installation, "GET", "/foo", attempts=3, base_delay=0)
+async def test_does_not_retry_client_error() -> None:
+    client = _plain_client()
+    installation = GitHubInstallation("Acme", 1, "organization")
+    calls = 0
 
-        self.assertEqual(calls, 1)
-        self.assertEqual(ctx.exception.status_code, 404)
+    async def fake_request(*_args: Any, **_kwargs: Any) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(404, json={"message": "not found"})
 
-    async def test_exhausts_retries_on_persistent_5xx(self) -> None:
-        client = _plain_client()
-        installation = GitHubInstallation("Acme", 1, "organization")
-        calls = 0
+    with (
+        mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="tok")),
+        mock.patch.object(httpx.AsyncClient, "request", side_effect=fake_request),
+        pytest.raises(GitHubError) as ctx,
+    ):
+        await client.request(installation, "GET", "/foo", attempts=3, base_delay=0)
 
-        async def fake_request(*_args: Any, **_kwargs: Any) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            return httpx.Response(503, json={"message": "unavailable"})
+    assert calls == 1
+    assert ctx.value.status_code == 404
 
-        with (
-            mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="tok")),
-            mock.patch.object(httpx.AsyncClient, "request", side_effect=fake_request),
-            mock.patch("orchestrator.github.asyncio.sleep", mock.AsyncMock()),
-            self.assertRaises(GitHubError),
-        ):
-            await client.request(installation, "GET", "/foo", attempts=3, base_delay=0)
 
-        self.assertEqual(calls, 3)
+async def test_exhausts_retries_on_persistent_5xx() -> None:
+    client = _plain_client()
+    installation = GitHubInstallation("Acme", 1, "organization")
+    calls = 0
+
+    async def fake_request(*_args: Any, **_kwargs: Any) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, json={"message": "unavailable"})
+
+    with (
+        mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="tok")),
+        mock.patch.object(httpx.AsyncClient, "request", side_effect=fake_request),
+        mock.patch("orchestrator.github.asyncio.sleep", mock.AsyncMock()),
+        pytest.raises(GitHubError),
+    ):
+        await client.request(installation, "GET", "/foo", attempts=3, base_delay=0)
+
+    assert calls == 3
