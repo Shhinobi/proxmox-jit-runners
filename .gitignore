@@ -12,4 +12,5 @@ venv/
 .mypy_cache/
 .coverage
 htmlcov/
+.codegraph/
 
