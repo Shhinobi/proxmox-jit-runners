@@ -18,6 +18,7 @@
       event_options: ["push", "workflow_dispatch", "schedule", "pull_request", "release"],
       label_options: ["self-hosted", "proxmox-lxc", "crossbuild"],
       installations: {},
+      profiles: {},
       broker_note: "",
       warm_target: 0,
     },
@@ -449,10 +450,15 @@
 
   function defaultPolicy(installationName) {
     const names = Object.keys(state.installationDraft || {});
+    const profileNames = Object.keys(state.policyMeta.profiles || {});
     return {
       github_installation: installationName || names[0] || "",
       default_mode: "ephemeral",
       warm_capacity: 0,
+      max_concurrent: 0,
+      warm_idle_capacity: -1,
+      warm_idle_after_seconds: 0,
+      profile: profileNames[0] || "crossbuild-small",
       allowed_modes: ["ephemeral", "pool", "persistent"],
       allowed_events: ["push", "workflow_dispatch", "schedule"],
       required_labels: ["self-hosted", "proxmox-lxc", "crossbuild"],
@@ -515,6 +521,14 @@
         github_installation: fieldValue(card, "[data-field='github_installation']"),
         default_mode: fieldValue(card, "[data-field='default_mode']", "ephemeral") || "ephemeral",
         warm_capacity: Number(fieldValue(card, "[data-field='warm_capacity']", "0") || 0),
+        max_concurrent: Number(fieldValue(card, "[data-field='max_concurrent']", "0") || 0),
+        warm_idle_capacity: Number(fieldValue(card, "[data-field='warm_idle_capacity']", "-1")),
+        // Field is edited in minutes (friendlier for this kind of window); convert to
+        // the seconds the backend actually stores, matching sibling *_seconds fields.
+        warm_idle_after_seconds: Math.round(
+          Number(fieldValue(card, "[data-field='warm_idle_after_minutes']", "0") || 0) * 60
+        ),
+        profile: fieldValue(card, "[data-field='profile']", "crossbuild-small") || "crossbuild-small",
         allowed_modes: [...card.querySelectorAll("[data-field='allowed_modes']:checked")].map((el) => el.value),
         allowed_events: [...card.querySelectorAll("[data-field='allowed_events']:checked")].map((el) => el.value),
         required_labels: [...card.querySelectorAll("[data-field='required_labels']:checked")].map((el) => el.value),
@@ -537,6 +551,7 @@
   function applyPoliciesMeta(policies) {
     if (!policies || typeof policies !== "object") return;
     state.policyMeta.installations = policies.installations || state.policyMeta.installations || {};
+    state.policyMeta.profiles = policies.profiles || state.policyMeta.profiles || {};
     state.policyMeta.mode_options = policies.mode_options || state.policyMeta.mode_options;
     state.policyMeta.event_options = policies.event_options || state.policyMeta.event_options;
     state.policyMeta.label_options = policies.label_options || state.policyMeta.label_options;
@@ -585,14 +600,16 @@
     const cap = state.capacityDraft || { max_active: 2, pool_size: 1 };
     const warmTarget = warmTargetFromRepos(state.policyDraft || {});
     const maxActive = Number(cap.max_active ?? 2);
-    const over = warmTarget > maxActive;
+    const poolSize = Number(cap.pool_size ?? 1);
+    const budget = warmTarget + poolSize;
+    const over = budget > maxActive;
     editor.innerHTML = `<article class="policy-card capacity-card">
       <div class="policy-card-head">
         <strong class="mono">Cluster capacity</strong>
         <span class="muted mono" id="capacity-warm-hint">${
           over
-            ? `⚠ warm target ${warmTarget} &gt; max_active ${maxActive}`
-            : `warm target ${warmTarget} / max_active ${maxActive}`
+            ? `⚠ warm target ${warmTarget} + pool_size ${poolSize} &gt; max_active ${maxActive}`
+            : `warm target ${warmTarget} + pool_size ${poolSize} / max_active ${maxActive}`
         }</span>
       </div>
       <div class="policy-grid">
@@ -604,8 +621,8 @@
         </label>
       </div>
       <p class="policy-hint muted" style="margin:0">
-        Raise <code>max_active</code> before increasing per-repo warm capacity.
-        Ready pool clones do not count against max_active until claimed.
+        <code>max_active</code> must cover sum(warm_capacity) + pool_size — raise it
+        before increasing per-repo warm capacity or the global pool.
       </p>
     </article>`;
   }
@@ -700,6 +717,19 @@
               `<option value="${escapeHtml(mode)}" ${policy.default_mode === mode ? "selected" : ""}>${escapeHtml(mode)}</option>`
           )
           .join("");
+        const profileNames = Object.keys(state.policyMeta.profiles || {});
+        const selectedProfile = policy.profile || profileNames[0] || "crossbuild-small";
+        const profileOptions = profileNames.length
+          ? profileNames
+              .map((name) => {
+                const spec = state.policyMeta.profiles[name] || {};
+                const hint = `${spec.cores ?? "?"}c/${spec.memory_mb ?? "?"}MB`;
+                return `<option value="${escapeHtml(name)}" ${selectedProfile === name ? "selected" : ""}>${escapeHtml(name)} · ${escapeHtml(hint)}</option>`;
+              })
+              .join("")
+          : `<option value="${escapeHtml(selectedProfile)}">${escapeHtml(selectedProfile)}</option>`;
+        const warmCapacity = Number(policy.warm_capacity ?? 0);
+        const warmIdleCapacity = Number(policy.warm_idle_capacity ?? -1);
         return `<article class="policy-card repo-card" data-repo="${escapeHtml(repo)}">
           <div class="policy-card-head">
             <strong class="mono">Policy #${index + 1}</strong>
@@ -715,10 +745,28 @@
             <label>Default mode
               <select data-field="default_mode">${modeOptions}</select>
             </label>
+            <label>Profile
+              <select data-field="profile">${profileOptions}</select>
+            </label>
             <label>Warm capacity
-              <input data-field="warm_capacity" type="number" min="0" step="1" value="${escapeHtml(policy.warm_capacity ?? 0)}" />
+              <input data-field="warm_capacity" type="number" min="0" step="1" value="${escapeHtml(warmCapacity)}" />
+            </label>
+            <label>Max concurrent <span class="muted">(0 = unlimited)</span>
+              <input data-field="max_concurrent" type="number" min="0" step="1" value="${escapeHtml(policy.max_concurrent ?? 0)}" />
+            </label>
+            <label>Warm idle floor <span class="muted">(-1 = disabled)</span>
+              <input data-field="warm_idle_capacity" type="number" min="-1" max="${escapeHtml(warmCapacity)}" step="1" value="${escapeHtml(warmIdleCapacity)}" />
+            </label>
+            <label>Warm idle after (minutes)
+              <input data-field="warm_idle_after_minutes" type="number" min="0" step="5" value="${escapeHtml(Math.round((policy.warm_idle_after_seconds ?? 0) / 60))}" />
             </label>
           </div>
+          <p class="policy-hint muted" style="margin:0">
+            Warm idle: after this many minutes with no job request, warm supply drops
+            from <code>warm_capacity</code> to <code>warm_idle_capacity</code>, then
+            scales back up (one clone at a time) on the next request. Leave floor at
+            <code>-1</code> to keep warm_capacity fixed.
+          </p>
           <div class="policy-checks">Allowed modes<div class="check-row">${modes}</div></div>
           <div class="policy-checks">Allowed events<div class="check-row">${events}</div></div>
           <div class="policy-checks">Required labels<div class="check-row">${labels}</div></div>
@@ -926,11 +974,12 @@
       return;
     }
     const warmTarget = warmTargetFromRepos(repositories);
-    if (warmTarget > capacity.max_active) {
+    const capacityBudget = warmTarget + Number(capacity.pool_size || 0);
+    if (capacityBudget > capacity.max_active) {
       showToast(
         "bad",
         "Capacity insuficiente",
-        `max_active (${capacity.max_active}) deve ser >= soma de warm_capacity (${warmTarget}).`,
+        `max_active (${capacity.max_active}) deve ser >= soma de warm_capacity (${warmTarget}) + pool_size (${capacity.pool_size}).`,
         12000
       );
       return;
@@ -938,7 +987,15 @@
     const instNames = Object.keys(installations);
     const names = Object.keys(repositories);
     const warmLines = names
-      .map((n) => `· ${n} warm=${repositories[n].warm_capacity ?? 0}`)
+      .map((n) => {
+        const repo = repositories[n];
+        const bits = [`warm=${repo.warm_capacity ?? 0}`, `profile=${repo.profile || "crossbuild-small"}`];
+        if (Number(repo.max_concurrent || 0) > 0) bits.push(`max_concurrent=${repo.max_concurrent}`);
+        if (Number(repo.warm_idle_capacity ?? -1) >= 0) {
+          bits.push(`idle→${repo.warm_idle_capacity} after ${Math.round((repo.warm_idle_after_seconds || 0) / 60)}min`);
+        }
+        return `· ${n} ${bits.join(" ")}`;
+      })
       .join("\n");
     showToast("info", "Confirme o save", "Use o diálogo para aplicar.", 4000);
     const ok = await confirmAction({
