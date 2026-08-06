@@ -1,38 +1,63 @@
 # proxmox-jit-runners
 
-A self-hosted GitHub Actions runner orchestrator: it receives `workflow_job`
-webhooks, validates policy and signature, clones a golden LXC template on a
-Proxmox node, attaches a persistent build cache, and injects a single-use
-just-in-time (JIT) runner registration. State is SQLite/WAL; every webhook
-delivery is deduplicated by `X-GitHub-Delivery`.
+Self-hosted GitHub Actions runners for a homelab Proxmox cluster — spun up
+fresh for each job and thrown away when it's done, instead of sitting
+around as an always-on VM.
 
-A single GitHub App key can serve multiple installations. Each repository
-policy picks an installation of scope `repository` (personal account) or
-`organization` (with a runner group), and incoming webhooks are validated
-against that binding.
+## Why this exists
 
-## What it does
+GitHub's own hosted runners are easy but limited: capped build minutes, no
+custom hardware, and no shared build cache between runs. The usual fix —
+register a long-lived VM as a self-hosted runner — solves that, but that
+VM now sits idle most of the day, and every job that runs on it can see
+whatever the previous job left behind.
 
-- **Ephemeral runners on demand** — clones a Proxmox LXC template per job,
-  injects a JIT-scoped credential, destroys the container after the job.
-- **Warm pool** — keeps N pre-registered, idle runners per repository so a
-  job can start in seconds instead of waiting for a clone. Optionally scales
-  the warm target down after a configurable idle window and back up on the
-  next request (`warm_idle_capacity` / `warm_idle_after_seconds`).
-- **Global pool** — a shared reserve of generic, unregistered clones that any
-  repository's ephemeral jobs can claim as a fallback, cutting cold-start
-  latency without a dedicated warm reserve per repo.
-- **Persistent mode** — a long-lived runner per repository, recycled between
-  jobs instead of destroyed.
-- **Per-repository policy** — required labels, allowed modes/events,
-  concurrency ceiling (`max_concurrent`), a resource profile
-  (`profiles:`, selectable per repo), all hot-reloadable through the API/UI
-  without a restart.
-- **Reconcile loop** — a continuous background pass that self-heals: retries
-  provisioning/cleanup with backoff, replenishes warm/pool supply, clears
-  stuck clones and zombie GitHub registrations, and enforces capacity.
-- **Dashboard** — a no-build-step HTML/JS UI with live updates over SSE,
-  policy editing, cache inventory, and admin actions (drain/resume/reconcile).
+This project takes a different approach. It listens for GitHub's
+`workflow_job` webhook and, when a job needs a runner, clones a fresh
+Proxmox LXC container from a template ("golden image"), registers it with
+GitHub for exactly one job — a "just-in-time" (JIT) runner — and destroys
+the container once the job finishes. Every job gets a clean environment,
+and nothing sits around burning electricity between jobs. Optionally, a
+small pool of pre-cloned containers can be kept ready (a "warm pool") so a
+job starts in a couple of seconds instead of waiting ~30s for a clone.
+
+A background loop constantly double-checks reality against what's
+configured — replenishing the warm pool, retrying anything that failed,
+and cleaning up containers or GitHub runner registrations that got stuck —
+so a crash or a flaky webhook doesn't leave things in a broken state.
+
+## What it can do
+
+- **Ephemeral runners on demand** — clone → register → run the job →
+  destroy. The default, simplest mode.
+- **Warm pool** — keep a few runners per repository pre-registered and
+  idle, so jobs start almost instantly. Can automatically scale down after
+  a period of inactivity and back up on the next request.
+- **Global pool** — a shared reserve of generic, not-yet-registered clones
+  that any repository can claim as a fallback, without needing a dedicated
+  warm pool for every repo.
+- **Persistent mode** — for repos that want a long-lived runner recycled
+  between jobs instead of destroyed each time.
+- **Per-repository policy** — required labels, which modes/events are
+  allowed, a concurrency ceiling, and a resource profile (CPU/RAM/disk),
+  all editable live from the dashboard — no restart needed.
+- **Self-healing reconcile loop** — the background pass described above.
+- **A live dashboard** — see what's running, browse job/webhook history,
+  edit policy, inspect the build cache, and trigger admin actions (drain,
+  resume, force-reconcile), all updating live over SSE.
+
+## Before you start
+
+You'll need:
+- A **Proxmox VE** cluster with a "golden" LXC container template already
+  built (the thing that gets cloned for every job).
+- A **GitHub App** (not a personal access token) with permission to manage
+  self-hosted runners for the repos/orgs you want to serve.
+- An SSH-reachable **cache broker** on the Proxmox host — a small
+  restricted-command script (not included here) that mounts/cleans a
+  shared build cache directory for each container. See `orchestrator/broker.py`
+  for the exact commands it needs to support.
+- [`uv`](https://docs.astral.sh/uv/) to run it.
 
 ## Quick start
 
@@ -42,53 +67,55 @@ cp orchestrator/default-config.yaml /etc/runner-orchestrator/config.yaml   # edi
 uv run python -m orchestrator   # or: uv run uvicorn orchestrator.app:app --host 0.0.0.0 --port 8080
 ```
 
-Requires [`uv`](https://docs.astral.sh/uv/); `uv sync` creates `.venv` and
-installs pinned dependencies from `uv.lock`.
+`uv sync` creates a `.venv` and installs the pinned dependencies from
+`uv.lock` — no manual virtualenv/pip steps needed.
 
-Configuration is a single YAML file (`RUNNER_ORCHESTRATOR_CONFIG`, default
-`/etc/runner-orchestrator/config.yaml`) covering the GitHub App, the Proxmox
-API endpoint, a cache-management SSH broker, capacity limits, resource
-profiles, and per-repository policy. See `orchestrator/default-config.yaml`
-for every field with inline documentation. Repository policy and global
-capacity can also be edited live through `PUT /api/v1/admin/policies`
-(persisted to a writable override file, hot-reloaded, no restart needed).
+Everything is configured through one YAML file (path from the
+`RUNNER_ORCHESTRATOR_CONFIG` env var, default
+`/etc/runner-orchestrator/config.yaml`): the GitHub App, the Proxmox API
+endpoint, the cache broker, capacity limits, resource profiles, and policy
+for each repository. `orchestrator/default-config.yaml` documents every
+field inline — start from a copy of that file. Repository policy and
+global capacity can also be changed live from the dashboard (or
+`PUT /api/v1/admin/policies`), which writes a small override file and
+hot-reloads — no restart required either way.
 
-The orchestrator only talks to two other systems it does not implement
-itself:
-- A **Proxmox VE** API endpoint (clones/starts/stops/destroys the LXC template).
-- A restricted-command **SSH broker** running on the Proxmox host, for cache
-  mount/attach/cleanup operations that shouldn't go through the general
-  Proxmox API.
+The orchestrator talks to exactly two other systems, neither of which it
+implements itself:
+- The **Proxmox VE API** — to clone, start, stop, and destroy containers.
+- The **SSH cache broker** on the Proxmox host — a narrow, restricted set
+  of commands for mounting/cleaning the shared build cache, kept separate
+  from the general Proxmox API on purpose.
 
-## Dashboard / API
+## Dashboard & API
 
-- Live snapshot: `GET /api/v1/snapshot`, SSE stream: `GET /api/v1/events`
-- Listings: `instances|jobs|deliveries|policies|metrics-summary|job-durations`
-  with `?repository=&status=&mode=` filters
-- Admin: `POST /api/v1/admin/{drain,resume,reconcile,recycle-ready}`
-- Policies: `PUT /api/v1/admin/policies` (hot-reload, validates capacity
-  budget and profile references before persisting)
-- Cache: `GET /api/v1/cache`, `POST /api/v1/admin/cache/{purge,rename,gc}`
-- Metrics: `GET /metrics` (Prometheus), `GET /health/live`, `GET /health/ready`
-- Webhook: `POST /webhooks/github` (HMAC-validated `workflow_job` events)
+| What | Where |
+|---|---|
+| Live dashboard | `/ui/` |
+| Live snapshot / SSE stream | `GET /api/v1/snapshot`, `GET /api/v1/events` |
+| Instances, jobs, webhook deliveries | `GET /api/v1/{instances,jobs,deliveries}` (filter with `?repository=&status=&mode=`) |
+| Admin actions | `POST /api/v1/admin/{drain,resume,reconcile,recycle-ready}` |
+| Policy editing | `PUT /api/v1/admin/policies` (validates before saving, hot-reloads) |
+| Build cache | `GET /api/v1/cache`, `POST /api/v1/admin/cache/{purge,rename,gc}` |
+| Health & metrics | `GET /health/live`, `GET /health/ready`, `GET /metrics` (Prometheus) |
+| GitHub webhook | `POST /webhooks/github` (HMAC-signed `workflow_job` events) |
 
-The bundled dashboard (`orchestrator/ui/`) does not implement its own
-authentication — put it behind a reverse proxy / auth layer for anything
-beyond a trusted network.
+The dashboard doesn't implement its own login — put it behind a reverse
+proxy or auth layer (e.g. Authelia, Tailscale) unless it's only reachable
+on a trusted network.
 
 ## Development
 
 ```bash
 uv sync --dev
-uv run pytest
-uv run ruff check .
-uv run ruff format .
-uv run mypy orchestrator
+uv run pytest              # test suite (uses fakes for GitHub/Proxmox/broker — no live cluster needed)
+uv run ruff check .        # lint
+uv run ruff format .       # format
+uv run mypy orchestrator   # type-check
 ```
 
-Tests use fakes for the GitHub/Proxmox/broker clients (no live cluster
-needed) plus an in-memory/temp-file SQLite database. `uv run pre-commit
-install` wires ruff/mypy into a pre-commit hook.
+`uv run pre-commit install` wires ruff and mypy into a pre-commit hook.
+See [TODO.md](TODO.md) for known gaps and planned follow-ups.
 
 ## Origin
 
