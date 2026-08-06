@@ -7,21 +7,8 @@
     toastTimer: null,
     actionInFlight: false,
     confirmResolver: null,
+    confirmReturnFocus: null,
     openLogIds: new Set(),
-    policyDraft: null,
-    installationDraft: null,
-    capacityDraft: { max_active: 2, pool_size: 1 },
-    policiesHydrated: false,
-    policiesDirty: false,
-    policyMeta: {
-      mode_options: ["ephemeral", "pool", "persistent"],
-      event_options: ["push", "workflow_dispatch", "schedule", "pull_request", "release"],
-      label_options: ["self-hosted", "proxmox-lxc", "crossbuild"],
-      installations: {},
-      profiles: {},
-      broker_note: "",
-      warm_target: 0,
-    },
   };
 
   const $ = (id) => document.getElementById(id);
@@ -37,14 +24,40 @@
     document.removeEventListener("keydown", onConfirmKeydown);
     const resolve = state.confirmResolver;
     state.confirmResolver = null;
+    const returnFocus = state.confirmReturnFocus;
+    state.confirmReturnFocus = null;
+    if (returnFocus && typeof returnFocus.focus === "function") returnFocus.focus();
     if (resolve) resolve(Boolean(result));
+  }
+
+  function confirmFocusables() {
+    return [$("confirm-cancel"), $("confirm-ok")].filter(Boolean);
   }
 
   function onConfirmKeydown(event) {
     if (event.key === "Escape") {
       event.preventDefault();
       closeConfirm(false);
-    } else if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      return;
+    }
+    if (event.key === "Tab") {
+      // Minimal focus trap: cycle only between the two modal buttons.
+      const focusables = confirmFocusables();
+      if (!focusables.length) return;
+      event.preventDefault();
+      const currentIndex = focusables.indexOf(document.activeElement);
+      const lastIndex = focusables.length - 1;
+      const nextIndex = event.shiftKey
+        ? currentIndex <= 0
+          ? lastIndex
+          : currentIndex - 1
+        : currentIndex === -1 || currentIndex === lastIndex
+          ? 0
+          : currentIndex + 1;
+      focusables[nextIndex].focus();
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
       const active = document.activeElement;
       if (active && (active.id === "confirm-cancel" || active.tagName === "TEXTAREA")) return;
       // Ignore Enter that still targets the control which opened the dialog.
@@ -56,12 +69,12 @@
 
   /** In-dashboard confirmation dialog. @returns {Promise<boolean>} */
   function confirmAction({
-    title = "Confirmar ação",
+    title = "Confirm action",
     body = "",
-    confirmLabel = "Confirmar",
-    cancelLabel = "Cancelar",
+    confirmLabel = "Confirm",
+    cancelLabel = "Cancel",
     kind = "warn",
-    kicker = "Confirmar",
+    kicker = "Confirm",
   } = {}) {
     return new Promise((resolve) => {
       if (state.confirmResolver) {
@@ -84,6 +97,7 @@
       $("confirm-ok").textContent = confirmLabel;
       $("confirm-cancel").textContent = cancelLabel;
       state.confirmResolver = resolve;
+      state.confirmReturnFocus = document.activeElement;
       document.body.classList.add("modal-open");
       document.addEventListener("keydown", onConfirmKeydown);
       // Delay focus so the activating keyup/click cannot instantly confirm.
@@ -192,13 +206,29 @@
     return `<div class="card"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`;
   }
 
+  function summaryCardsHtml(caps) {
+    return [
+      card("Queue", caps.queued ?? 0),
+      card("Active", `${caps.active ?? 0}/${caps.max_active ?? "?"}`),
+      card(
+        "Warm ready",
+        caps.warm_target != null
+          ? `${caps.warm_ready ?? 0}/${caps.warm_target}`
+          : (caps.warm_ready ?? 0)
+      ),
+      card("Pool ready", `${caps.pool_ready ?? 0}/${caps.pool_size ?? "?"}`),
+      card("Delete failed", caps.delete_failed ?? 0),
+      card("Oldest queued", fmtAge(caps.oldest_queued_job_age_seconds)),
+    ].join("");
+  }
+
   function renderTable(el, headers, rowsHtml) {
     if (!rowsHtml) {
-      el.innerHTML = `<tbody><tr><td class="empty" colspan="${headers.length}">Nenhum registro</td></tr></tbody>`;
+      el.innerHTML = `<tbody><tr><td class="empty" colspan="${headers.length}">No records</td></tr></tbody>`;
       return;
     }
     el.innerHTML = `
-      <thead><tr>${headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>
+      <thead><tr>${headers.map((h) => `<th scope="col">${escapeHtml(h)}</th>`).join("")}</tr></thead>
       <tbody>${rowsHtml}</tbody>
     `;
   }
@@ -216,6 +246,40 @@
   function link(url, label) {
     if (!url) return escapeHtml(label || "—");
     return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label || "open")}</a>`;
+  }
+
+  function formatApiError(body, status) {
+    const detail = body?.detail ?? body?.message ?? body?.error;
+    if (detail == null || detail === "") return `HTTP ${status}`;
+    if (typeof detail === "string") return detail;
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return String(detail);
+    }
+  }
+
+  /** Shared fetch + JSON parse + error-normalization for every API call. */
+  async function apiRequest(path, options = {}) {
+    const { body: requestBody, headers, ...rest } = options;
+    const response = await fetch(path, {
+      ...rest,
+      headers: {
+        Accept: "application/json",
+        ...(requestBody != null ? { "Content-Type": "application/json" } : {}),
+        ...(headers || {}),
+      },
+      body: requestBody,
+    });
+    const text = await response.text();
+    let parsed = {};
+    try {
+      parsed = text ? JSON.parse(text) : {};
+    } catch {
+      parsed = { detail: text };
+    }
+    if (!response.ok) throw new Error(formatApiError(parsed, response.status));
+    return parsed;
   }
 
   function operationalBadge(overview) {
@@ -269,19 +333,7 @@
   function renderOverview(overview) {
     const caps = overview.capacity || {};
     renderBadges(overview);
-    $("cards").innerHTML = [
-      card("Queue", caps.queued ?? 0),
-      card("Active", `${caps.active ?? 0}/${caps.max_active ?? "?"}`),
-      card(
-        "Warm ready",
-        caps.warm_target != null
-          ? `${caps.warm_ready ?? 0}/${caps.warm_target}`
-          : (caps.warm_ready ?? 0)
-      ),
-      card("Pool ready", `${caps.pool_ready ?? 0}/${caps.pool_size ?? "?"}`),
-      card("Delete failed", caps.delete_failed ?? 0),
-      card("Oldest queued", fmtAge(caps.oldest_queued_job_age_seconds)),
-    ].join("");
+    $("cards").innerHTML = summaryCardsHtml(caps);
     $("btn-drain").disabled = !!overview.drain;
     $("btn-resume").disabled = !overview.drain;
   }
@@ -448,615 +500,367 @@
     );
   }
 
-  function defaultPolicy(installationName) {
-    const names = Object.keys(state.installationDraft || {});
-    const profileNames = Object.keys(state.policyMeta.profiles || {});
+  // --- Policies (Alpine.js store; see #panel-policies in index.html) -------
+
+  let nextDraftId = 1;
+
+  function cloneInstallation(key, inst) {
+    inst = inst || {};
     return {
-      github_installation: installationName || names[0] || "",
-      default_mode: "ephemeral",
-      warm_capacity: 0,
-      max_concurrent: 0,
-      warm_idle_capacity: -1,
-      warm_idle_after_seconds: 0,
-      profile: profileNames[0] || "crossbuild-small",
-      allowed_modes: ["ephemeral", "pool", "persistent"],
-      allowed_events: ["push", "workflow_dispatch", "schedule"],
-      required_labels: ["self-hosted", "proxmox-lxc", "crossbuild"],
+      _id: nextDraftId++,
+      key,
+      account: inst.account || "",
+      installation_id: Number(inst.installation_id || 0),
+      scope: inst.scope || "repository",
+      runner_group_id: Number(inst.runner_group_id ?? 1),
     };
   }
 
-  function defaultInstallation() {
+  function clonePolicy(repo, policy) {
+    policy = policy || {};
     return {
-      account: "",
-      installation_id: 0,
-      scope: "repository",
-      runner_group_id: 1,
+      _id: nextDraftId++,
+      repository: repo,
+      github_installation: policy.github_installation || "",
+      default_mode: policy.default_mode || "ephemeral",
+      warm_capacity: Number(policy.warm_capacity ?? 0),
+      max_concurrent: Number(policy.max_concurrent ?? 0),
+      warm_idle_capacity: Number(policy.warm_idle_capacity ?? -1),
+      warm_idle_after_minutes: Math.round(Number(policy.warm_idle_after_seconds ?? 0) / 60),
+      profile: policy.profile || "crossbuild-small",
+      allowed_modes: [...(policy.allowed_modes || [])],
+      allowed_events: [...(policy.allowed_events || [])],
+      required_labels: [...(policy.required_labels || [])],
     };
   }
 
-  function fieldValue(root, selector, fallback = "") {
-    const el = root.querySelector(selector);
-    if (!el) return fallback;
-    return String(el.value ?? fallback);
-  }
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("policies", {
+      capacity: { max_active: 2, pool_size: 1 },
+      installations: [],
+      repositories: [],
+      meta: {
+        mode_options: ["ephemeral", "pool", "persistent"],
+        event_options: ["push", "workflow_dispatch", "schedule", "pull_request", "release"],
+        label_options: ["self-hosted", "proxmox-lxc", "crossbuild"],
+        installations: {},
+        profiles: {},
+        broker_note: "",
+        warm_target: 0,
+      },
+      hydrated: false,
+      dirty: false,
+      saving: false,
+      statusKind: "muted",
+      statusText: "",
 
-  function formatApiError(body, status) {
-    const detail = body?.detail ?? body?.message ?? body?.error;
-    if (detail == null || detail === "") return `HTTP ${status}`;
-    if (typeof detail === "string") return detail;
-    try {
-      return JSON.stringify(detail);
-    } catch {
-      return String(detail);
-    }
-  }
+      get installationNames() {
+        return this.installations.map((inst) => inst.key).filter(Boolean);
+      },
+      get profileNames() {
+        return Object.keys(this.meta.profiles || {});
+      },
+      get warmTarget() {
+        return this.repositories.reduce((sum, policy) => sum + Number(policy.warm_capacity || 0), 0);
+      },
+      get warmBudgetOver() {
+        return this.warmTarget + Number(this.capacity.pool_size || 0) > Number(this.capacity.max_active || 0);
+      },
+      get warmBudgetHint() {
+        const budget = this.warmTarget + Number(this.capacity.pool_size || 0);
+        const max = Number(this.capacity.max_active || 0);
+        return this.warmBudgetOver
+          ? `⚠ warm target ${this.warmTarget} + pool_size ${this.capacity.pool_size} > max_active ${max}`
+          : `warm target ${this.warmTarget} + pool_size ${this.capacity.pool_size} / max_active ${max}`;
+      },
 
-  /** Read current form values into state (source of truth before any re-render). */
-  function pullPoliciesFromDom() {
-    const capacityRoot = $("capacity-editor");
-    const capacity = {
-      max_active: Number(
-        fieldValue(capacityRoot || document, "[data-field='max_active']", String(state.capacityDraft?.max_active ?? 2)) || 2
-      ),
-      pool_size: Number(
-        fieldValue(capacityRoot || document, "[data-field='pool_size']", String(state.capacityDraft?.pool_size ?? 1)) || 1
-      ),
-    };
-    const installations = {};
-    document.querySelectorAll("#install-editor .install-card").forEach((card) => {
-      const key = fieldValue(card, "[data-field='install_key']").trim();
-      if (!key) return;
-      installations[key] = {
-        account: fieldValue(card, "[data-field='account']").trim(),
-        installation_id: Number(fieldValue(card, "[data-field='installation_id']", "0") || 0),
-        scope: fieldValue(card, "[data-field='scope']", "repository") || "repository",
-        runner_group_id: Number(fieldValue(card, "[data-field='runner_group_id']", "1") || 1),
-      };
+      installationLabel(name) {
+        const inst = this.installations.find((i) => i.key === name);
+        return inst ? `${name} · ${inst.account || "?"}` : name;
+      },
+      profileLabel(name) {
+        const spec = this.meta.profiles[name] || {};
+        return `${name} · ${spec.cores ?? "?"}c/${spec.memory_mb ?? "?"}MB`;
+      },
+
+      setStatus(kind, text) {
+        this.statusKind = kind || "muted";
+        this.statusText = text || "";
+      },
+
+      markDirty() {
+        this.dirty = true;
+        this.setStatus("warn", "Unsaved changes");
+      },
+
+      addInstallation() {
+        let name = "personal";
+        let i = 1;
+        const existing = new Set(this.installations.map((inst) => inst.key));
+        while (existing.has(name)) name = `personal-${i++}`;
+        this.installations.push(cloneInstallation(name, {}));
+        this.markDirty();
+      },
+      removeInstallation(index) {
+        this.installations.splice(index, 1);
+        this.markDirty();
+      },
+      addRepository() {
+        const firstAccount = this.installations[0]?.account || "Owner";
+        let name = `${firstAccount}/NewRepo`;
+        let i = 1;
+        const existing = new Set(this.repositories.map((p) => p.repository));
+        while (existing.has(name)) name = `${firstAccount}/NewRepo-${i++}`;
+        this.repositories.push(
+          clonePolicy(name, {
+            github_installation: this.installations[0]?.key || "",
+            default_mode: "ephemeral",
+            profile: this.profileNames[0] || "crossbuild-small",
+            allowed_modes: ["ephemeral", "pool", "persistent"],
+            allowed_events: ["push", "workflow_dispatch", "schedule"],
+            required_labels: ["self-hosted", "proxmox-lxc", "crossbuild"],
+          })
+        );
+        this.markDirty();
+      },
+      removeRepository(index) {
+        this.repositories.splice(index, 1);
+        this.markDirty();
+      },
+
+      applyMeta(policies) {
+        if (!policies || typeof policies !== "object") return;
+        this.meta.installations = policies.installations || this.meta.installations || {};
+        this.meta.profiles = policies.profiles || this.meta.profiles || {};
+        this.meta.mode_options = policies.mode_options || this.meta.mode_options;
+        this.meta.event_options = policies.event_options || this.meta.event_options;
+        this.meta.label_options = policies.label_options || this.meta.label_options;
+        this.meta.broker_note = policies.broker_note || this.meta.broker_note || "";
+        if (policies.warm_target != null) this.meta.warm_target = Number(policies.warm_target) || 0;
+        const list = $("repo-list");
+        if (list) {
+          list.innerHTML = Object.keys(policies.repositories || {})
+            .map((name) => `<option value="${escapeHtml(name)}"></option>`)
+            .join("");
+        }
+      },
+
+      hydrate(policies, { force = false } = {}) {
+        this.applyMeta(policies || {});
+        if (this.hydrated && !force) return;
+        this.installations = Object.entries((policies && policies.installations) || {}).map(
+          ([key, inst]) => cloneInstallation(key, inst)
+        );
+        this.repositories = Object.entries((policies && policies.repositories) || {}).map(
+          ([repo, policy]) => clonePolicy(repo, policy)
+        );
+        const cap = (policies && policies.capacity) || {};
+        this.capacity = {
+          max_active: Number(cap.max_active ?? this.capacity.max_active ?? 2),
+          pool_size: Number(cap.pool_size ?? this.capacity.pool_size ?? 1),
+        };
+        this.hydrated = true;
+        this.dirty = false;
+        this.setStatus("muted", "");
+      },
+
+      toPayload() {
+        const installations = {};
+        for (const inst of this.installations) {
+          const key = (inst.key || "").trim();
+          if (!key) continue;
+          installations[key] = {
+            account: (inst.account || "").trim(),
+            installation_id: Number(inst.installation_id || 0),
+            scope: inst.scope || "repository",
+            runner_group_id: Number(inst.runner_group_id || 1),
+          };
+        }
+        const repositories = {};
+        for (const policy of this.repositories) {
+          const repo = (policy.repository || "").trim();
+          if (!repo) continue;
+          repositories[repo] = {
+            github_installation: policy.github_installation || "",
+            default_mode: policy.default_mode || "ephemeral",
+            warm_capacity: Number(policy.warm_capacity || 0),
+            max_concurrent: Number(policy.max_concurrent || 0),
+            warm_idle_capacity: Number(policy.warm_idle_capacity ?? -1),
+            warm_idle_after_seconds: Math.round(Number(policy.warm_idle_after_minutes || 0) * 60),
+            profile: policy.profile || "crossbuild-small",
+            allowed_modes: [...policy.allowed_modes],
+            allowed_events: [...policy.allowed_events],
+            required_labels: [...policy.required_labels],
+          };
+        }
+        return {
+          capacity: {
+            max_active: Number(this.capacity.max_active),
+            pool_size: Number(this.capacity.pool_size),
+          },
+          installations,
+          repositories,
+        };
+      },
+
+      async load() {
+        this.setStatus("warn", "Loading policies…");
+        try {
+          const body = await apiRequest("/api/v1/policies");
+          this.hydrate(body, { force: true });
+          this.setStatus("ok", "Policies loaded");
+          showToast(
+            "ok",
+            "Policies loaded",
+            `${Object.keys(body.installations || {}).length} installation(s), ${Object.keys(body.repositories || {}).length} repo(s)`,
+            4000
+          );
+        } catch (error) {
+          this.setStatus("bad", "Load failed");
+          showToast("bad", "Failed to load policies", String(error.message || error), 12000);
+          // Still show empty editors so the user can create from scratch.
+          if (!this.hydrated) this.hydrate({ installations: {}, repositories: {} }, { force: true });
+        }
+      },
+
+      async reset() {
+        const ok = await confirmAction({
+          kind: "warn",
+          kicker: "Policies",
+          title: "Reload from server?",
+          body: "Discards the local draft and fetches the current installations/repositories from the API.",
+          confirmLabel: "Reload",
+          cancelLabel: "Keep editing",
+        });
+        if (!ok) {
+          showToast("info", "Reset cancelled", "", 3000);
+          return;
+        }
+        this.dirty = false;
+        await this.load();
+      },
+
+      async save() {
+        if (state.actionInFlight) {
+          showToast("warn", "Please wait", "Another action is already in progress.", 4000);
+          return;
+        }
+        const { capacity, installations, repositories } = this.toPayload();
+        if (!Object.keys(installations).length) {
+          showToast(
+            "bad",
+            "Invalid policies",
+            "Keep at least one installation (Key + Account + ID).",
+            10000
+          );
+          return;
+        }
+        if (!Object.keys(repositories).length) {
+          showToast("bad", "Invalid policies", "Keep at least one Owner/Name repository.", 10000);
+          return;
+        }
+        if (!Number.isFinite(capacity.max_active) || capacity.max_active < 1) {
+          showToast("bad", "Invalid capacity", "max_active must be an integer >= 1.", 10000);
+          return;
+        }
+        if (!Number.isFinite(capacity.pool_size) || capacity.pool_size < 0) {
+          showToast("bad", "Invalid capacity", "pool_size must be an integer >= 0.", 10000);
+          return;
+        }
+        const warmTarget = Object.values(repositories).reduce(
+          (sum, r) => sum + Number(r.warm_capacity || 0),
+          0
+        );
+        const budget = warmTarget + Number(capacity.pool_size || 0);
+        if (budget > capacity.max_active) {
+          showToast(
+            "bad",
+            "Insufficient capacity",
+            `max_active (${capacity.max_active}) must be >= sum of warm_capacity (${warmTarget}) + pool_size (${capacity.pool_size}).`,
+            12000
+          );
+          return;
+        }
+        const instNames = Object.keys(installations);
+        const names = Object.keys(repositories);
+        const warmLines = names
+          .map((n) => {
+            const repo = repositories[n];
+            const bits = [
+              `warm=${repo.warm_capacity ?? 0}`,
+              `profile=${repo.profile || "crossbuild-small"}`,
+            ];
+            if (Number(repo.max_concurrent || 0) > 0) bits.push(`max_concurrent=${repo.max_concurrent}`);
+            if (Number(repo.warm_idle_capacity ?? -1) >= 0) {
+              bits.push(
+                `idle→${repo.warm_idle_capacity} after ${Math.round((repo.warm_idle_after_seconds || 0) / 60)}min`
+              );
+            }
+            return `· ${n} ${bits.join(" ")}`;
+          })
+          .join("\n");
+        const ok = await confirmAction({
+          kind: "ok",
+          kicker: "Policies",
+          title: "Save and apply policies?",
+          body: `Capacity: max_active=${capacity.max_active}, pool_size=${capacity.pool_size} (warm target=${warmTarget})\n\n${instNames.length} installation(s):\n${instNames
+            .map((n) => `· ${n} → ${installations[n].account} (id ${installations[n].installation_id})`)
+            .join("\n")}\n\n${names.length} repository(ies):\n${warmLines}\n\nWrites the override file and syncs the broker.`,
+          confirmLabel: "Save and apply",
+          cancelLabel: "Cancel",
+        });
+        if (!ok) {
+          showToast("info", "Save cancelled", "Nothing was written.", 4000);
+          this.setStatus("warn", "Save cancelled");
+          return;
+        }
+        state.actionInFlight = true;
+        this.saving = true;
+        showToast("warn", "Saving policies…", "Sending to the orchestrator", 0);
+        this.setStatus("warn", "Saving…");
+        try {
+          const body = await apiRequest("/api/v1/admin/policies", {
+            method: "PUT",
+            body: JSON.stringify({ capacity, repositories, installations }),
+          });
+          this.hydrate(body.policies || { capacity, repositories, installations }, { force: true });
+          const cacheNote =
+            Array.isArray(body.cache_ops) && body.cache_ops.length
+              ? `\ncache: ${body.cache_ops.join("; ")}`
+              : "";
+          showToast(
+            "ok",
+            "Policies saved",
+            `${body.message || "OK"}\n${body.broker_note || ""}${cacheNote}`,
+            15000
+          );
+          this.setStatus("ok", "Saved");
+        } catch (error) {
+          showToast("bad", "Failed to save policies", String(error.message || error), 15000);
+          this.setStatus("bad", "Save error");
+        } finally {
+          state.actionInFlight = false;
+          this.saving = false;
+        }
+      },
     });
-    const repositories = {};
-    document.querySelectorAll("#policy-editor .repo-card").forEach((card) => {
-      const repo = fieldValue(card, "[data-field='repository']").trim();
-      if (!repo) return;
-      repositories[repo] = {
-        github_installation: fieldValue(card, "[data-field='github_installation']"),
-        default_mode: fieldValue(card, "[data-field='default_mode']", "ephemeral") || "ephemeral",
-        warm_capacity: Number(fieldValue(card, "[data-field='warm_capacity']", "0") || 0),
-        max_concurrent: Number(fieldValue(card, "[data-field='max_concurrent']", "0") || 0),
-        warm_idle_capacity: Number(fieldValue(card, "[data-field='warm_idle_capacity']", "-1")),
-        // Field is edited in minutes (friendlier for this kind of window); convert to
-        // the seconds the backend actually stores, matching sibling *_seconds fields.
-        warm_idle_after_seconds: Math.round(
-          Number(fieldValue(card, "[data-field='warm_idle_after_minutes']", "0") || 0) * 60
-        ),
-        profile: fieldValue(card, "[data-field='profile']", "crossbuild-small") || "crossbuild-small",
-        allowed_modes: [...card.querySelectorAll("[data-field='allowed_modes']:checked")].map((el) => el.value),
-        allowed_events: [...card.querySelectorAll("[data-field='allowed_events']:checked")].map((el) => el.value),
-        required_labels: [...card.querySelectorAll("[data-field='required_labels']:checked")].map((el) => el.value),
-      };
-    });
-    state.capacityDraft = capacity;
-    state.installationDraft = installations;
-    state.policyDraft = repositories;
-    state.policiesDirty = true;
-    return { capacity, installations, repositories };
-  }
 
-  function warmTargetFromRepos(repositories) {
-    return Object.values(repositories || {}).reduce(
-      (sum, policy) => sum + Number(policy?.warm_capacity || 0),
-      0
-    );
-  }
+    Alpine.store("policies").load();
+  });
 
-  function applyPoliciesMeta(policies) {
-    if (!policies || typeof policies !== "object") return;
-    state.policyMeta.installations = policies.installations || state.policyMeta.installations || {};
-    state.policyMeta.profiles = policies.profiles || state.policyMeta.profiles || {};
-    state.policyMeta.mode_options = policies.mode_options || state.policyMeta.mode_options;
-    state.policyMeta.event_options = policies.event_options || state.policyMeta.event_options;
-    state.policyMeta.label_options = policies.label_options || state.policyMeta.label_options;
-    state.policyMeta.broker_note = policies.broker_note || state.policyMeta.broker_note || "";
-    if (policies.warm_target != null) {
-      state.policyMeta.warm_target = Number(policies.warm_target) || 0;
-    }
-    const list = $("repo-list");
-    if (list) {
-      list.innerHTML = Object.keys(policies.repositories || {})
-        .map((name) => `<option value="${escapeHtml(name)}"></option>`)
-        .join("");
-    }
-    const note = $("policy-note");
-    if (note && !state.policiesDirty) {
-      note.textContent = state.policyMeta.broker_note || "";
-    }
-  }
-
-  function hydratePolicies(policies, { force = false } = {}) {
-    applyPoliciesMeta(policies || {});
-    if (state.policiesHydrated && !force) return;
-    state.installationDraft = JSON.parse(JSON.stringify((policies && policies.installations) || {}));
-    state.policyDraft = JSON.parse(JSON.stringify((policies && policies.repositories) || {}));
-    const cap = (policies && policies.capacity) || {};
-    state.capacityDraft = {
-      max_active: Number(cap.max_active ?? state.capacityDraft?.max_active ?? 2),
-      pool_size: Number(cap.pool_size ?? state.capacityDraft?.pool_size ?? 1),
-    };
-    state.policiesHydrated = true;
-    state.policiesDirty = false;
-    const note = $("policy-note");
-    if (note) note.textContent = state.policyMeta.broker_note || "";
-    renderPolicies();
-  }
-
-  function renderPolicies() {
-    renderCapacityEditor();
-    renderInstallationEditor();
-    renderPolicyEditor();
-  }
-
-  function renderCapacityEditor() {
-    const editor = $("capacity-editor");
-    if (!editor) return;
-    const cap = state.capacityDraft || { max_active: 2, pool_size: 1 };
-    const warmTarget = warmTargetFromRepos(state.policyDraft || {});
-    const maxActive = Number(cap.max_active ?? 2);
-    const poolSize = Number(cap.pool_size ?? 1);
-    const budget = warmTarget + poolSize;
-    const over = budget > maxActive;
-    editor.innerHTML = `<article class="policy-card capacity-card">
-      <div class="policy-card-head">
-        <strong class="mono">Cluster capacity</strong>
-        <span class="muted mono" id="capacity-warm-hint">${
-          over
-            ? `⚠ warm target ${warmTarget} + pool_size ${poolSize} &gt; max_active ${maxActive}`
-            : `warm target ${warmTarget} + pool_size ${poolSize} / max_active ${maxActive}`
-        }</span>
-      </div>
-      <div class="policy-grid">
-        <label>Max active (global)
-          <input data-field="max_active" type="number" min="1" step="1" value="${escapeHtml(cap.max_active ?? 2)}" />
-        </label>
-        <label>Pool size (global)
-          <input data-field="pool_size" type="number" min="0" step="1" value="${escapeHtml(cap.pool_size ?? 1)}" />
-        </label>
-      </div>
-      <p class="policy-hint muted" style="margin:0">
-        <code>max_active</code> must cover sum(warm_capacity) + pool_size — raise it
-        before increasing per-repo warm capacity or the global pool.
-      </p>
-    </article>`;
-  }
-
-  function renderInstallationEditor() {
-    const editor = $("install-editor");
-    if (!editor) return;
-    const draft = state.installationDraft || {};
-    const entries = Object.entries(draft);
-    if (!entries.length) {
-      editor.innerHTML =
-        `<div class="empty">Nenhuma installation. Clique em <strong>Add installation</strong>.</div>`;
-      return;
-    }
-    editor.innerHTML = entries
-      .map(([key, inst], index) => {
-        const scope = inst.scope || "repository";
-        return `<article class="policy-card install-card" data-install-key="${escapeHtml(key)}">
-          <div class="policy-card-head">
-            <strong class="mono">Installation #${index + 1}</strong>
-            <button type="button" class="btn ghost" data-action="install-delete" data-key="${escapeHtml(key)}">Remove</button>
-          </div>
-          <div class="policy-grid">
-            <label>Key
-              <input data-field="install_key" value="${escapeHtml(key)}" placeholder="personal-or-org" />
-            </label>
-            <label>Account (handle/org)
-              <input data-field="account" value="${escapeHtml(inst.account || "")}" placeholder="acme" />
-            </label>
-            <label>Installation ID
-              <input data-field="installation_id" type="number" min="1" step="1" value="${escapeHtml(inst.installation_id || "")}" placeholder="1234567" />
-            </label>
-            <label>Scope
-              <select data-field="scope">
-                <option value="repository" ${scope === "repository" ? "selected" : ""}>repository</option>
-                <option value="organization" ${scope === "organization" ? "selected" : ""}>organization</option>
-              </select>
-            </label>
-            <label>Runner group ID
-              <input data-field="runner_group_id" type="number" min="1" step="1" value="${escapeHtml(inst.runner_group_id ?? 1)}" />
-            </label>
-          </div>
-        </article>`;
-      })
-      .join("");
-  }
-
-  function renderPolicyEditor() {
-    const editor = $("policy-editor");
-    if (!editor) return;
-    const draft = state.policyDraft || {};
-    const liveInstalls = state.installationDraft || {};
-    const installationNames = Object.keys(liveInstalls);
-    const entries = Object.entries(draft);
-    if (!entries.length) {
-      editor.innerHTML =
-        `<div class="empty">Nenhuma policy. Clique em <strong>Add repository</strong>.</div>`;
-      return;
-    }
-    editor.innerHTML = entries
-      .map(([repo, policy], index) => {
-        const modes = (state.policyMeta.mode_options || [])
-          .map(
-            (mode) =>
-              `<label class="inline"><input type="checkbox" data-field="allowed_modes" value="${escapeHtml(mode)}" ${(policy.allowed_modes || []).includes(mode) ? "checked" : ""}/> ${escapeHtml(mode)}</label>`
-          )
-          .join("");
-        const events = (state.policyMeta.event_options || [])
-          .map(
-            (event) =>
-              `<label class="inline"><input type="checkbox" data-field="allowed_events" value="${escapeHtml(event)}" ${(policy.allowed_events || []).includes(event) ? "checked" : ""}/> ${escapeHtml(event)}</label>`
-          )
-          .join("");
-        const labels = (state.policyMeta.label_options || [])
-          .map(
-            (label) =>
-              `<label class="inline"><input type="checkbox" data-field="required_labels" value="${escapeHtml(label)}" ${(policy.required_labels || []).includes(label) ? "checked" : ""}/> ${escapeHtml(label)}</label>`
-          )
-          .join("");
-        const selectedInstall = policy.github_installation || installationNames[0] || "";
-        const installOptions = installationNames.length
-          ? installationNames
-              .map((name) => {
-                const account = liveInstalls[name]?.account || "?";
-                return `<option value="${escapeHtml(name)}" ${selectedInstall === name ? "selected" : ""}>${escapeHtml(name)} · ${escapeHtml(account)}</option>`;
-              })
-              .join("")
-          : `<option value="">(adicione uma installation)</option>`;
-        const modeOptions = (state.policyMeta.mode_options || [])
-          .map(
-            (mode) =>
-              `<option value="${escapeHtml(mode)}" ${policy.default_mode === mode ? "selected" : ""}>${escapeHtml(mode)}</option>`
-          )
-          .join("");
-        const profileNames = Object.keys(state.policyMeta.profiles || {});
-        const selectedProfile = policy.profile || profileNames[0] || "crossbuild-small";
-        const profileOptions = profileNames.length
-          ? profileNames
-              .map((name) => {
-                const spec = state.policyMeta.profiles[name] || {};
-                const hint = `${spec.cores ?? "?"}c/${spec.memory_mb ?? "?"}MB`;
-                return `<option value="${escapeHtml(name)}" ${selectedProfile === name ? "selected" : ""}>${escapeHtml(name)} · ${escapeHtml(hint)}</option>`;
-              })
-              .join("")
-          : `<option value="${escapeHtml(selectedProfile)}">${escapeHtml(selectedProfile)}</option>`;
-        const warmCapacity = Number(policy.warm_capacity ?? 0);
-        const warmIdleCapacity = Number(policy.warm_idle_capacity ?? -1);
-        return `<article class="policy-card repo-card" data-repo="${escapeHtml(repo)}">
-          <div class="policy-card-head">
-            <strong class="mono">Policy #${index + 1}</strong>
-            <button type="button" class="btn ghost" data-action="repo-delete" data-repo="${escapeHtml(repo)}">Remove</button>
-          </div>
-          <div class="policy-grid">
-            <label>Repository
-              <input data-field="repository" value="${escapeHtml(repo)}" placeholder="Owner/Name" />
-            </label>
-            <label>Installation
-              <select data-field="github_installation">${installOptions}</select>
-            </label>
-            <label>Default mode
-              <select data-field="default_mode">${modeOptions}</select>
-            </label>
-            <label>Profile
-              <select data-field="profile">${profileOptions}</select>
-            </label>
-            <label>Warm capacity
-              <input data-field="warm_capacity" type="number" min="0" step="1" value="${escapeHtml(warmCapacity)}" />
-            </label>
-            <label>Max concurrent <span class="muted">(0 = unlimited)</span>
-              <input data-field="max_concurrent" type="number" min="0" step="1" value="${escapeHtml(policy.max_concurrent ?? 0)}" />
-            </label>
-            <label>Warm idle floor <span class="muted">(-1 = disabled)</span>
-              <input data-field="warm_idle_capacity" type="number" min="-1" max="${escapeHtml(warmCapacity)}" step="1" value="${escapeHtml(warmIdleCapacity)}" />
-            </label>
-            <label>Warm idle after (minutes)
-              <input data-field="warm_idle_after_minutes" type="number" min="0" step="5" value="${escapeHtml(Math.round((policy.warm_idle_after_seconds ?? 0) / 60))}" />
-            </label>
-          </div>
-          <p class="policy-hint muted" style="margin:0">
-            Warm idle: after this many minutes with no job request, warm supply drops
-            from <code>warm_capacity</code> to <code>warm_idle_capacity</code>, then
-            scales back up (one clone at a time) on the next request. Leave floor at
-            <code>-1</code> to keep warm_capacity fixed.
-          </p>
-          <div class="policy-checks">Allowed modes<div class="check-row">${modes}</div></div>
-          <div class="policy-checks">Allowed events<div class="check-row">${events}</div></div>
-          <div class="policy-checks">Required labels<div class="check-row">${labels}</div></div>
-        </article>`;
-      })
-      .join("");
-  }
-
-  async function loadPoliciesFromApi() {
-    setPolicyStatus("warn", "Carregando policies…");
-    try {
-      const response = await fetch("/api/v1/policies", { headers: { Accept: "application/json" } });
-      const text = await response.text();
-      let body = {};
-      try {
-        body = text ? JSON.parse(text) : {};
-      } catch {
-        body = { detail: text };
-      }
-      if (!response.ok) throw new Error(formatApiError(body, response.status));
-      hydratePolicies(body, { force: true });
-      setPolicyStatus("ok", "Policies carregadas");
-      showToast(
-        "ok",
-        "Policies carregadas",
-        `${Object.keys(body.installations || {}).length} installation(s), ${Object.keys(body.repositories || {}).length} repo(s)`,
-        4000
-      );
-    } catch (error) {
-      setPolicyStatus("bad", "Falha ao carregar");
-      showToast("bad", "Falha ao carregar policies", String(error.message || error), 12000);
-      // Still show empty editors so the user can create from scratch.
-      if (!state.policiesHydrated) {
-        hydratePolicies({ installations: {}, repositories: {} }, { force: true });
-      }
-    }
-  }
-
-  function setupPolicyEditor() {
+  function setupPolicyDirtyTracking() {
     const panel = $("panel-policies");
-    if (!panel) {
-      console.error("panel-policies missing");
-      return;
-    }
-
-    // Mark dirty on any edit without re-rendering.
-    panel.addEventListener("input", (event) => {
+    if (!panel) return;
+    const markDirty = (event) => {
       if (event.target && event.target.matches("input, select, textarea")) {
-        state.policiesDirty = true;
-        setPolicyStatus("warn", "Alterações não salvas");
+        window.Alpine?.store("policies")?.markDirty();
       }
-    });
-    panel.addEventListener("change", (event) => {
-      if (event.target && event.target.matches("input, select, textarea")) {
-        state.policiesDirty = true;
-        setPolicyStatus("warn", "Alterações não salvas");
-      }
-    });
-
-    // Event delegation for all policy actions.
-    panel.addEventListener("click", async (event) => {
-      const btn = event.target.closest("button");
-      if (!btn || !panel.contains(btn)) return;
-      const id = btn.id;
-      const action = btn.getAttribute("data-action");
-
-      try {
-        if (id === "btn-install-add") {
-          event.preventDefault();
-          pullPoliciesFromDom();
-          let name = "personal";
-          let i = 1;
-          while (state.installationDraft[name]) name = `personal-${i++}`;
-          state.installationDraft[name] = defaultInstallation();
-          renderPolicies();
-          setPolicyStatus("warn", "Installation adicionada (não salva)");
-          return;
-        }
-
-        if (id === "btn-policy-add") {
-          event.preventDefault();
-          pullPoliciesFromDom();
-          const installs = state.installationDraft || {};
-          const firstAccount = Object.values(installs)[0]?.account || "Owner";
-          let name = `${firstAccount}/NewRepo`;
-          let i = 1;
-          while (state.policyDraft[name]) name = `${firstAccount}/NewRepo-${i++}`;
-          state.policyDraft[name] = defaultPolicy();
-          renderPolicies();
-          setPolicyStatus("warn", "Repository adicionado (não salvo)");
-          return;
-        }
-
-        if (id === "btn-policy-reset") {
-          event.preventDefault();
-          const ok = await confirmAction({
-            kind: "warn",
-            kicker: "Policies",
-            title: "Recarregar do servidor?",
-            body: "Descarta o draft local e busca installations/repositórios atuais da API.",
-            confirmLabel: "Recarregar",
-            cancelLabel: "Continuar editando",
-          });
-          if (!ok) {
-            showToast("info", "Reset cancelado", "", 3000);
-            return;
-          }
-          state.policiesDirty = false;
-          await loadPoliciesFromApi();
-          return;
-        }
-
-        if (id === "btn-policy-save") {
-          event.preventDefault();
-          await savePolicies();
-          return;
-        }
-
-        if (action === "install-delete") {
-          event.preventDefault();
-          const key = btn.getAttribute("data-key") || "";
-          const ok = await confirmAction({
-            kind: "bad",
-            kicker: "Installations",
-            title: "Remover installation?",
-            body: key
-              ? `Remove "${key}" do draft. Salve depois para aplicar.`
-              : "Remove a installation do draft.",
-            confirmLabel: "Remover",
-            cancelLabel: "Manter",
-          });
-          if (!ok) return;
-          pullPoliciesFromDom();
-          // Prefer current key field if renamed.
-          const card = btn.closest(".install-card");
-          const liveKey = card ? fieldValue(card, "[data-field='install_key']").trim() : key;
-          delete state.installationDraft[liveKey];
-          if (key && key !== liveKey) delete state.installationDraft[key];
-          renderPolicies();
-          setPolicyStatus("warn", "Installation removida do draft");
-          return;
-        }
-
-        if (action === "repo-delete") {
-          event.preventDefault();
-          const repo = btn.getAttribute("data-repo") || "";
-          const ok = await confirmAction({
-            kind: "bad",
-            kicker: "Policies",
-            title: "Remover policy?",
-            body: repo
-              ? `Remove ${repo} do draft. Salve depois para aplicar.`
-              : "Remove a policy do draft.",
-            confirmLabel: "Remover",
-            cancelLabel: "Manter",
-          });
-          if (!ok) return;
-          pullPoliciesFromDom();
-          const card = btn.closest(".repo-card");
-          const liveRepo = card ? fieldValue(card, "[data-field='repository']").trim() : repo;
-          delete state.policyDraft[liveRepo];
-          if (repo && repo !== liveRepo) delete state.policyDraft[repo];
-          renderPolicies();
-          setPolicyStatus("warn", "Policy removida do draft");
-        }
-      } catch (error) {
-        showToast("bad", "Erro na aba Policies", String(error.message || error), 12000);
-        console.error(error);
-      }
-    });
-
-    // Initial load independent of SSE.
-    loadPoliciesFromApi();
+    };
+    panel.addEventListener("input", markDirty);
+    panel.addEventListener("change", markDirty);
   }
 
-  async function savePolicies() {
-    if (state.actionInFlight) {
-      showToast("warn", "Aguarde", "Já existe uma ação em andamento.", 4000);
-      return;
-    }
-    const saveBtn = $("btn-policy-save");
-    let capacity;
-    let installations;
-    let repositories;
-    try {
-      ({ capacity, installations, repositories } = pullPoliciesFromDom());
-    } catch (error) {
-      showToast("bad", "Falha ao ler o formulário", String(error.message || error), 12000);
-      return;
-    }
-    if (!Object.keys(installations).length) {
-      showToast("bad", "Policies inválidas", "Mantenha ao menos uma installation (Key + Account + ID).", 10000);
-      return;
-    }
-    if (!Object.keys(repositories).length) {
-      showToast("bad", "Policies inválidas", "Mantenha ao menos um repositório Owner/Name.", 10000);
-      return;
-    }
-    if (!Number.isFinite(capacity.max_active) || capacity.max_active < 1) {
-      showToast("bad", "Capacity inválida", "max_active deve ser um inteiro >= 1.", 10000);
-      return;
-    }
-    if (!Number.isFinite(capacity.pool_size) || capacity.pool_size < 0) {
-      showToast("bad", "Capacity inválida", "pool_size deve ser um inteiro >= 0.", 10000);
-      return;
-    }
-    const warmTarget = warmTargetFromRepos(repositories);
-    const capacityBudget = warmTarget + Number(capacity.pool_size || 0);
-    if (capacityBudget > capacity.max_active) {
-      showToast(
-        "bad",
-        "Capacity insuficiente",
-        `max_active (${capacity.max_active}) deve ser >= soma de warm_capacity (${warmTarget}) + pool_size (${capacity.pool_size}).`,
-        12000
-      );
-      return;
-    }
-    const instNames = Object.keys(installations);
-    const names = Object.keys(repositories);
-    const warmLines = names
-      .map((n) => {
-        const repo = repositories[n];
-        const bits = [`warm=${repo.warm_capacity ?? 0}`, `profile=${repo.profile || "crossbuild-small"}`];
-        if (Number(repo.max_concurrent || 0) > 0) bits.push(`max_concurrent=${repo.max_concurrent}`);
-        if (Number(repo.warm_idle_capacity ?? -1) >= 0) {
-          bits.push(`idle→${repo.warm_idle_capacity} after ${Math.round((repo.warm_idle_after_seconds || 0) / 60)}min`);
-        }
-        return `· ${n} ${bits.join(" ")}`;
-      })
-      .join("\n");
-    showToast("info", "Confirme o save", "Use o diálogo para aplicar.", 4000);
-    const ok = await confirmAction({
-      kind: "ok",
-      kicker: "Policies",
-      title: "Salvar e aplicar policies?",
-      body: `Capacity: max_active=${capacity.max_active}, pool_size=${capacity.pool_size} (warm target=${warmTarget})\n\n${instNames.length} installation(s):\n${instNames
-        .map((n) => `· ${n} → ${installations[n].account} (id ${installations[n].installation_id})`)
-        .join("\n")}\n\n${names.length} repositório(s):\n${warmLines}\n\nGrava override e sincroniza broker.`,
-      confirmLabel: "Salvar e aplicar",
-      cancelLabel: "Cancelar",
-    });
-    if (!ok) {
-      showToast("info", "Save cancelado", "Nada foi gravado.", 4000);
-      setPolicyStatus("warn", "Save cancelado");
-      return;
-    }
-    state.actionInFlight = true;
-    if (saveBtn) {
-      saveBtn.disabled = true;
-      saveBtn.classList.add("busy");
-    }
-    showToast("warn", "Saving policies…", "Enviando para o orchestrator", 0);
-    setPolicyStatus("warn", "Salvando…");
-    try {
-      const response = await fetch("/api/v1/admin/policies", {
-        method: "PUT",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({ capacity, repositories, installations }),
-      });
-      const text = await response.text();
-      let body = {};
-      try {
-        body = text ? JSON.parse(text) : {};
-      } catch {
-        body = { detail: text };
-      }
-      if (!response.ok) throw new Error(formatApiError(body, response.status));
-      hydratePolicies(body.policies || { capacity, repositories, installations }, { force: true });
-      const cacheNote =
-        Array.isArray(body.cache_ops) && body.cache_ops.length
-          ? `\ncache: ${body.cache_ops.join("; ")}`
-          : "";
-      showToast(
-        "ok",
-        "Policies salvas",
-        `${body.message || "OK"}\n${body.broker_note || ""}${cacheNote}`,
-        15000
-      );
-      setPolicyStatus("ok", "Salvo");
-    } catch (error) {
-      showToast("bad", "Falha ao salvar policies", String(error.message || error), 15000);
-      setPolicyStatus("bad", "Erro ao salvar");
-    } finally {
-      state.actionInFlight = false;
-      if (saveBtn) {
-        saveBtn.disabled = false;
-        saveBtn.classList.remove("busy");
-      }
-    }
-  }
+  // --- Metrics / chart -------------------------------------------------------
 
   function renderMetrics(metrics) {
     const prov = metrics?.provision_seconds_avg || {};
@@ -1124,31 +928,19 @@
     if (!state.actionInFlight) {
       renderOverview(snapshot.overview || {});
     } else {
-      const caps = snapshot.overview?.capacity || {};
       renderBadges(snapshot.overview || {});
-      $("cards").innerHTML = [
-        card("Queue", caps.queued ?? 0),
-        card("Active", `${caps.active ?? 0}/${caps.max_active ?? "?"}`),
-        card(
-          "Warm ready",
-          caps.warm_target != null
-            ? `${caps.warm_ready ?? 0}/${caps.warm_target}`
-            : (caps.warm_ready ?? 0)
-        ),
-        card("Pool ready", `${caps.pool_ready ?? 0}/${caps.pool_size ?? "?"}`),
-        card("Delete failed", caps.delete_failed ?? 0),
-        card("Oldest queued", fmtAge(caps.oldest_queued_job_age_seconds)),
-      ].join("");
+      $("cards").innerHTML = summaryCardsHtml(snapshot.overview?.capacity || {});
     }
     renderAlerts(snapshot.alerts || []);
     renderInstances(snapshot.instances || []);
     renderJobs(snapshot.jobs || []);
     renderDeliveries(snapshot.deliveries || []);
     renderLogs(snapshot.logs || []);
-    // Policies are loaded via GET /api/v1/policies (not SSE). Keep a server
-    // snapshot for reference only — never re-render the editors from SSE.
-    if (snapshot.policies && !state.policiesDirty) {
-      applyPoliciesMeta(snapshot.policies);
+    // Policies are loaded via GET /api/v1/policies (not SSE). Keep the server
+    // snapshot for reference only — never clobber a dirty local draft.
+    if (snapshot.policies) {
+      const store = window.Alpine?.store("policies");
+      if (store && !store.dirty) store.applyMeta(snapshot.policies);
     }
     renderMetrics(snapshot.metrics || {});
     renderDurationChart(snapshot.job_durations || []);
@@ -1213,24 +1005,10 @@
       b.classList.remove("busy");
     });
     if (active) active.classList.add("busy");
-    showToast("warn", `${label}…`, "Aguardando resposta do orchestrator.", 0);
+    showToast("warn", `${label}…`, "Waiting for the orchestrator's response.", 0);
     $("refresh-meta").textContent = `${label} in progress…`;
     try {
-      const response = await fetch(path, {
-        method: "POST",
-        headers: { Accept: "application/json" },
-      });
-      const text = await response.text();
-      let body = {};
-      try {
-        body = text ? JSON.parse(text) : {};
-      } catch {
-        body = { raw: text };
-      }
-      if (!response.ok) {
-        throw new Error(body.message || body.detail || `HTTP ${response.status}`);
-      }
-
+      const body = await apiRequest(path, { method: "POST" });
       let detail = body.message || JSON.stringify(body);
       if (body.action === "reconcile" || body.action === "recycle-ready") {
         const extra =
@@ -1241,16 +1019,14 @@
       } else if (body.action === "drain" || body.action === "resume") {
         detail = `${body.message || ""}\ndrain=${body.drain} · marker=${body.marker || "—"}`;
       }
-      showToast("ok", `${label} concluído`, detail, 12000);
+      showToast("ok", `${label} done`, detail, 12000);
       $("refresh-meta").textContent = `${label} ok · ${new Date().toLocaleTimeString()}`;
 
       // Pull a fresh snapshot once so badges reflect the new state immediately.
-      const snap = await fetch(`/api/v1/snapshot?${queryString()}`, {
-        headers: { Accept: "application/json" },
-      });
-      if (snap.ok) applySnapshot(await snap.json());
+      const snapshot = await apiRequest(`/api/v1/snapshot?${queryString()}`);
+      applySnapshot(snapshot);
     } catch (error) {
-      showToast("bad", `${label} falhou`, String(error.message || error), 15000);
+      showToast("bad", `${label} failed`, String(error.message || error), 15000);
       $("refresh-meta").textContent = `${label} error: ${error.message}`;
     } finally {
       state.actionInFlight = false;
@@ -1282,7 +1058,7 @@
     const repos = data.repositories || [];
     const summary = $("cache-summary");
     if (summary) {
-      summary.innerHTML = `Volume <code>${escapeHtml(data.root || "/srv/runner-cache")}</code> · used ${escapeHtml(fmtBytes(data.used_bytes))} / ${escapeHtml(fmtBytes(data.total_bytes))} (${escapeHtml(data.usage_percent)}%, max ${escapeHtml(data.max_usage_percent)}%) · soft quota ${escapeHtml(data.quota_gb)} GiB/repo · auto-GC orphans &gt; ${escapeHtml(data.gc_orphan_days ?? "?")}d`;
+      summary.innerHTML = `Volume <code>${escapeHtml(data.root || "/srv/runner-cache")}</code> · used ${escapeHtml(fmtBytes(data.used_bytes))} / ${escapeHtml(fmtBytes(data.total_bytes))} (${escapeHtml(data.usage_percent)}%, max ${escapeHtml(data.max_usage_percent)}%) · soft quota ${escapeHtml(data.quota_gb)} GiB/repo · auto-GC orphans &gt; ${escapeHtml(data.gc_orphan_days ?? "?")}d`;
     }
     const rows = repos
       .map((item) => {
@@ -1308,33 +1084,24 @@
         const repo = button.getAttribute("data-repo") || "";
         const ok = await confirmAction({
           kind: "bad",
-          kicker: "Cache · destrutivo",
+          kicker: "Cache · destructive",
           title: `Purge cache ${repo}?`,
-          body: `Apaga /srv/runner-cache/${repo} no pve.\nRecusa se algum CT JIT tiver o path montado.\nRebuild do cache no próximo job.`,
+          body: `Deletes /srv/runner-cache/${repo} on pve.\nRefuses if any JIT CT still has the path mounted.\nCache rebuilds on the next job.`,
           confirmLabel: "Purge",
-          cancelLabel: "Cancelar",
+          cancelLabel: "Cancel",
         });
         if (!ok) return;
         setCacheStatus("warn", `Purging ${repo}…`);
         try {
-          const response = await fetch("/api/v1/admin/cache/purge", {
+          const body = await apiRequest("/api/v1/admin/cache/purge", {
             method: "POST",
-            headers: { Accept: "application/json", "Content-Type": "application/json" },
             body: JSON.stringify({ repository: repo }),
           });
-          const text = await response.text();
-          let body = {};
-          try {
-            body = text ? JSON.parse(text) : {};
-          } catch {
-            body = { detail: text };
-          }
-          if (!response.ok) throw new Error(formatApiError(body, response.status));
           showToast("ok", "Cache purged", body.message || repo, 10000);
           setCacheStatus("ok", `Purged ${repo}`);
           await loadCacheInventory();
         } catch (error) {
-          showToast("bad", "Purge falhou", String(error.message || error), 12000);
+          showToast("bad", "Purge failed", String(error.message || error), 12000);
           setCacheStatus("bad", "Purge error");
         }
       });
@@ -1344,15 +1111,7 @@
   async function loadCacheInventory() {
     setCacheStatus("warn", "Loading…");
     try {
-      const response = await fetch("/api/v1/cache", { headers: { Accept: "application/json" } });
-      const text = await response.text();
-      let body = {};
-      try {
-        body = text ? JSON.parse(text) : {};
-      } catch {
-        body = { detail: text };
-      }
-      if (!response.ok) throw new Error(formatApiError(body, response.status));
+      const body = await apiRequest("/api/v1/cache");
       renderCacheInventory(body);
       const orphans = (body.repositories || []).filter((r) => r.orphan).length;
       setCacheStatus(
@@ -1360,7 +1119,7 @@
         `${(body.repositories || []).length} repo cache(s)${orphans ? ` · ${orphans} orphan` : ""}`
       );
     } catch (error) {
-      showToast("bad", "Falha ao listar cache", String(error.message || error), 12000);
+      showToast("bad", "Failed to list cache", String(error.message || error), 12000);
       setCacheStatus("bad", "Load failed");
     }
   }
@@ -1376,31 +1135,22 @@
           kind: "warn",
           kicker: "Cache GC",
           title: "Garbage-collect orphan caches?",
-          body: "Apaga diretórios em /srv/runner-cache que não estão no allowlist do broker.\nUsa o min age de gc_orphan_days da config (default 7; 0 = todos).\nNão mexe em caches de policies ativas.",
+          body: "Deletes directories under /srv/runner-cache that aren't on the broker's allowlist.\nUses config's gc_orphan_days as the min age (default 7; 0 = all).\nNever touches caches for active policies.",
           confirmLabel: "Run GC",
-          cancelLabel: "Cancelar",
+          cancelLabel: "Cancel",
         });
         if (!ok) return;
         setCacheStatus("warn", "GC running…");
         try {
-          const response = await fetch("/api/v1/admin/cache/gc", {
+          const body = await apiRequest("/api/v1/admin/cache/gc", {
             method: "POST",
-            headers: { Accept: "application/json", "Content-Type": "application/json" },
             body: JSON.stringify({}),
           });
-          const text = await response.text();
-          let body = {};
-          try {
-            body = text ? JSON.parse(text) : {};
-          } catch {
-            body = { detail: text };
-          }
-          if (!response.ok) throw new Error(formatApiError(body, response.status));
           showToast("ok", "Cache GC", body.message || "done", 12000);
           setCacheStatus("ok", body.message || "GC done");
           await loadCacheInventory();
         } catch (error) {
-          showToast("bad", "GC falhou", String(error.message || error), 12000);
+          showToast("bad", "GC failed", String(error.message || error), 12000);
           setCacheStatus("bad", "GC error");
         }
       });
@@ -1410,38 +1160,29 @@
         const from = ($("cache-rename-from")?.value || "").trim();
         const to = ($("cache-rename-to")?.value || "").trim();
         if (!from || !to) {
-          showToast("bad", "Rename inválido", "Preencha From e To (Owner/Repo).", 8000);
+          showToast("bad", "Invalid rename", "Fill in both From and To (Owner/Repo).", 8000);
           return;
         }
         const ok = await confirmAction({
           kind: "ok",
           kicker: "Cache rename",
-          title: "Renomear cache?",
-          body: `${from}\n→ ${to}\n\nMove o diretório no pve. Destino deve estar vazio/quase vazio. Source não pode estar montado em CT.`,
+          title: "Rename cache?",
+          body: `${from}\n→ ${to}\n\nMoves the directory on pve. Destination must be empty/nearly empty. Source must not be mounted in a CT.`,
           confirmLabel: "Rename",
-          cancelLabel: "Cancelar",
+          cancelLabel: "Cancel",
         });
         if (!ok) return;
         setCacheStatus("warn", "Renaming…");
         try {
-          const response = await fetch("/api/v1/admin/cache/rename", {
+          const body = await apiRequest("/api/v1/admin/cache/rename", {
             method: "POST",
-            headers: { Accept: "application/json", "Content-Type": "application/json" },
             body: JSON.stringify({ from, to }),
           });
-          const text = await response.text();
-          let body = {};
-          try {
-            body = text ? JSON.parse(text) : {};
-          } catch {
-            body = { detail: text };
-          }
-          if (!response.ok) throw new Error(formatApiError(body, response.status));
           showToast("ok", "Cache renamed", body.message || `${from} → ${to}`, 12000);
           setCacheStatus("ok", body.message || "renamed");
           await loadCacheInventory();
         } catch (error) {
-          showToast("bad", "Rename falhou", String(error.message || error), 12000);
+          showToast("bad", "Rename failed", String(error.message || error), 12000);
           setCacheStatus("bad", "Rename error");
         }
       });
@@ -1451,9 +1192,13 @@
   function setupTabs() {
     document.querySelectorAll(".tab").forEach((button) => {
       button.addEventListener("click", () => {
-        document.querySelectorAll(".tab").forEach((el) => el.classList.remove("active"));
+        document.querySelectorAll(".tab").forEach((el) => {
+          el.classList.remove("active");
+          el.setAttribute("aria-selected", "false");
+        });
         document.querySelectorAll(".panel").forEach((el) => el.classList.remove("active"));
         button.classList.add("active");
+        button.setAttribute("aria-selected", "true");
         $(`panel-${button.dataset.tab}`).classList.add("active");
         if (button.dataset.tab === "cache") {
           loadCacheInventory();
@@ -1498,9 +1243,9 @@
       const ok = await confirmAction({
         kind: "warn",
         kicker: "Admin",
-        title: "Ativar drain?",
-        body: "Novos jobs ficam na fila até você clicar em Resume. Jobs em andamento não são interrompidos.",
-        confirmLabel: "Ativar drain",
+        title: "Enable drain?",
+        body: "New jobs stay queued until you click Resume. Jobs already running are not interrupted.",
+        confirmLabel: "Enable drain",
       });
       if (ok) postAdmin("/api/v1/admin/drain", "Drain");
     });
@@ -1508,8 +1253,8 @@
       const ok = await confirmAction({
         kind: "ok",
         kicker: "Admin",
-        title: "Desativar drain?",
-        body: "O orchestrator volta a aceitar e provisionar jobs da fila.",
+        title: "Disable drain?",
+        body: "The orchestrator resumes accepting and provisioning queued jobs.",
         confirmLabel: "Resume",
       });
       if (ok) postAdmin("/api/v1/admin/resume", "Resume");
@@ -1518,8 +1263,8 @@
       const ok = await confirmAction({
         kind: "info",
         kicker: "Admin",
-        title: "Rodar reconcile agora?",
-        body: "Executa cleanup de instances pendentes e repõe pool/warm conforme a policy.",
+        title: "Run reconcile now?",
+        body: "Cleans up pending instances and replenishes pool/warm supply per policy.",
         confirmLabel: "Reconcile",
       });
       if (ok) postAdmin("/api/v1/admin/reconcile", "Reconcile");
@@ -1527,10 +1272,10 @@
     $("btn-recycle-ready").addEventListener("click", async () => {
       const ok = await confirmAction({
         kind: "bad",
-        kicker: "Admin · destrutivo",
-        title: "Reciclar pool/warm ready?",
-        body: "Só funciona se não houver instances em provisioning/running.\n\nClones ready serão destruídos e repostos do template. Use após update de golden image ou cache.",
-        confirmLabel: "Reciclar ready",
+        kicker: "Admin · destructive",
+        title: "Recycle ready pool/warm?",
+        body: "Only works if no instances are provisioning/running.\n\nReady clones are destroyed and rebuilt from the template. Use after updating the golden image or cache.",
+        confirmLabel: "Recycle ready",
       });
       if (ok) postAdmin("/api/v1/admin/recycle-ready", "Recycle ready");
     });
@@ -1541,7 +1286,7 @@
   setupFilters();
   setupLogFilters();
   setupAdmin();
-  setupPolicyEditor();
+  setupPolicyDirtyTracking();
   setupCacheTab();
   connectSSE();
   window.addEventListener("resize", () => {

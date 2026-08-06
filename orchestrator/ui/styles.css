@@ -11,15 +11,51 @@
   --bad: #ff6b7a;
   --info: #7aa7ff;
   --chip: #1a2438;
+  --surface-2: #17233d;
+  --surface-3: #0a101c;
+  --detail-text: #ffb4bc;
+  --alert-critical-text: #ffd0d5;
+  --alert-warning-text: #fff1c2;
+  --alert-info-text: #d7e6ff;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
 }
 
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #f4f6fb;
+    --panel: #ffffff;
+    --border: #d7deec;
+    --text: #16213a;
+    --muted: #5b6b8c;
+    --accent: #2f6fed;
+    --ok: #17915a;
+    --warn: #9a6b00;
+    --bad: #c8293f;
+    --info: #2f6fed;
+    --chip: #eef1f9;
+    --surface-2: #e4e9f5;
+    --surface-3: #eef1f9;
+    --detail-text: #8a1f2d;
+    --alert-critical-text: #7a1520;
+    --alert-warning-text: #5c4300;
+    --alert-info-text: #16357a;
+  }
+}
+
 * { box-sizing: border-box; }
+
+[x-cloak] { display: none !important; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 body {
   margin: 0;
   font-family: var(--sans);
-  background: radial-gradient(1200px 600px at 10% -10%, #17233d 0%, var(--bg) 55%);
+  background: radial-gradient(1200px 600px at 10% -10%, var(--surface-2) 0%, var(--bg) 55%);
   color: var(--text);
   min-height: 100vh;
   padding: 1.25rem 1.5rem 2rem;
@@ -78,7 +114,7 @@ h2 { margin: 0; font-size: 0.95rem; font-weight: 600; color: var(--muted); }
   margin-bottom: 0;
   border-radius: 10px;
   border: 1px solid var(--border);
-  background: #15233a;
+  background: var(--surface-2);
   padding: 0.75rem 0.95rem;
   font-size: 0.9rem;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
@@ -125,7 +161,7 @@ h2 { margin: 0; font-size: 0.95rem; font-weight: 600; color: var(--muted); }
   position: relative;
   z-index: 1;
   width: min(480px, 100%);
-  background: linear-gradient(180deg, #152038 0%, var(--panel) 100%);
+  background: linear-gradient(180deg, var(--surface-2) 0%, var(--panel) 100%);
   border: 1px solid var(--border);
   border-radius: 14px;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
@@ -189,9 +225,9 @@ body.modal-open { overflow: hidden; }
   background: var(--panel);
   font-size: 0.88rem;
 }
-.alert.critical { border-color: color-mix(in srgb, var(--bad) 55%, var(--border)); color: #ffd0d5; }
-.alert.warning { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); color: #fff1c2; }
-.alert.info { border-color: color-mix(in srgb, var(--info) 55%, var(--border)); color: #d7e6ff; }
+.alert.critical { border-color: color-mix(in srgb, var(--bad) 55%, var(--border)); color: var(--alert-critical-text); }
+.alert.warning { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); color: var(--alert-warning-text); }
+.alert.info { border-color: color-mix(in srgb, var(--info) 55%, var(--border)); color: var(--alert-info-text); }
 .alert .code { font-family: var(--mono); font-size: 0.75rem; opacity: 0.8; margin-right: 0.5rem; }
 
 .cards {
@@ -201,7 +237,7 @@ body.modal-open { overflow: hidden; }
   margin-bottom: 1rem;
 }
 .card {
-  background: linear-gradient(180deg, #152038 0%, var(--panel) 100%);
+  background: linear-gradient(180deg, var(--surface-2) 0%, var(--panel) 100%);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 0.9rem 1rem;
@@ -299,7 +335,7 @@ th, td {
 th {
   position: sticky;
   top: 0;
-  background: #17233a;
+  background: var(--surface-2);
   color: var(--muted);
   font-weight: 600;
   font-size: 0.75rem;
@@ -370,7 +406,7 @@ a:hover { text-decoration: underline; }
 .logs-wrap {
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: #0d1524;
+  background: var(--surface-3);
   max-height: min(70vh, 640px);
   overflow: auto;
   font-family: var(--mono);
@@ -419,9 +455,9 @@ a:hover { text-decoration: underline; }
   margin: 0.15rem 0 0.2rem;
   padding: 0.55rem 0.65rem;
   border-radius: 8px;
-  background: #0a101c;
+  background: var(--surface-3);
   border: 1px solid var(--border);
-  color: #ffb4bc;
+  color: var(--detail-text);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 220px;

@@ -80,17 +80,23 @@ def test_ui_directory_contains_dashboard_assets() -> None:
     assert "snapshot.logs" in js
     assert "operationalBadge" in js
     assert "draining" in js
-    assert "install-editor" in html
-    assert "capacity-editor" in html
-    assert "pullPoliciesFromDom" in js
-    assert "loadPoliciesFromApi" in js
-    assert "renderCapacityEditor" in js
+    assert "install-card" in html
+    assert "capacity-card" in html
+    assert "$store.policies" in html
+    assert "alpine:init" in js
+    assert "Alpine.store(" in js
+    assert "addInstallation" in js
     assert "max_active" in js
-    assert "repo-card" in js
-    assert "installation_id" in js
+    assert "repo-card" in html
+    assert "installation_id" in html
     assert 'data-tab="cache"' in html
     assert "loadCacheInventory" in js
     assert "/api/v1/admin/cache/purge" in js
+    assert "alpinejs-3.15.12.min.js" in html
+    assert "apiRequest" in js
+    assert 'role="tab"' in html
+    assert 'role="tabpanel"' in html
+    assert 'lang="en"' in html
 
 
 def test_build_alerts_for_drain_and_delete_failed() -> None:

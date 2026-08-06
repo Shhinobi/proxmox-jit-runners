@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -30,12 +30,12 @@
     <div class="modal-card">
       <div class="modal-accent" id="confirm-accent"></div>
       <div class="modal-content">
-        <div class="modal-kicker" id="confirm-kicker">Confirmar</div>
-        <h3 class="modal-title" id="confirm-title">Confirmar ação</h3>
+        <div class="modal-kicker" id="confirm-kicker">Confirm</div>
+        <h3 class="modal-title" id="confirm-title">Confirm action</h3>
         <p class="modal-body" id="confirm-body"></p>
         <div class="modal-actions">
-          <button type="button" class="btn ghost" id="confirm-cancel" data-confirm-dismiss>Cancelar</button>
-          <button type="button" class="btn" id="confirm-ok">Confirmar</button>
+          <button type="button" class="btn ghost" id="confirm-cancel" data-confirm-dismiss>Cancel</button>
+          <button type="button" class="btn" id="confirm-ok">Confirm</button>
         </div>
       </div>
     </div>
@@ -83,25 +83,25 @@
   </section>
 
   <nav class="tabs" role="tablist">
-    <button type="button" class="tab active" data-tab="instances">Instances</button>
-    <button type="button" class="tab" data-tab="jobs">Jobs</button>
-    <button type="button" class="tab" data-tab="deliveries">Webhooks</button>
-    <button type="button" class="tab" data-tab="logs">Logs</button>
-    <button type="button" class="tab" data-tab="cache">Cache</button>
-    <button type="button" class="tab" data-tab="policies">Policies</button>
+    <button type="button" class="tab active" role="tab" id="tab-instances" aria-selected="true" aria-controls="panel-instances" data-tab="instances">Instances</button>
+    <button type="button" class="tab" role="tab" id="tab-jobs" aria-selected="false" aria-controls="panel-jobs" data-tab="jobs">Jobs</button>
+    <button type="button" class="tab" role="tab" id="tab-deliveries" aria-selected="false" aria-controls="panel-deliveries" data-tab="deliveries">Webhooks</button>
+    <button type="button" class="tab" role="tab" id="tab-logs" aria-selected="false" aria-controls="panel-logs" data-tab="logs">Logs</button>
+    <button type="button" class="tab" role="tab" id="tab-cache" aria-selected="false" aria-controls="panel-cache" data-tab="cache">Cache</button>
+    <button type="button" class="tab" role="tab" id="tab-policies" aria-selected="false" aria-controls="panel-policies" data-tab="policies">Policies</button>
   </nav>
 
   <main>
-    <section id="panel-instances" class="panel active">
+    <section id="panel-instances" class="panel active" role="tabpanel" aria-labelledby="tab-instances">
       <div class="table-wrap"><table id="table-instances"></table></div>
     </section>
-    <section id="panel-jobs" class="panel">
+    <section id="panel-jobs" class="panel" role="tabpanel" aria-labelledby="tab-jobs">
       <div class="table-wrap"><table id="table-jobs"></table></div>
     </section>
-    <section id="panel-deliveries" class="panel">
+    <section id="panel-deliveries" class="panel" role="tabpanel" aria-labelledby="tab-deliveries">
       <div class="table-wrap"><table id="table-deliveries"></table></div>
     </section>
-    <section id="panel-logs" class="panel">
+    <section id="panel-logs" class="panel" role="tabpanel" aria-labelledby="tab-logs">
       <div class="logs-toolbar">
         <label>Level
           <select id="log-filter-level">
@@ -130,11 +130,11 @@
         <span class="logs-meta muted" id="logs-meta"></span>
       </div>
       <div class="logs-wrap" id="logs-wrap">
-        <div class="logs-empty muted" id="logs-empty">Aguardando eventos do orchestrator…</div>
+        <div class="logs-empty muted" id="logs-empty">Waiting for orchestrator events…</div>
         <div id="logs-list" class="logs-list"></div>
       </div>
     </section>
-    <section id="panel-cache" class="panel">
+    <section id="panel-cache" class="panel" role="tabpanel" aria-labelledby="tab-cache">
       <div class="policy-toolbar">
         <button type="button" id="btn-cache-refresh" class="btn">Refresh</button>
         <button type="button" id="btn-cache-gc" class="btn warn">GC orphans</button>
@@ -157,26 +157,160 @@
         </div>
       </div>
     </section>
-    <section id="panel-policies" class="panel">
+    <section id="panel-policies" class="panel" role="tabpanel" aria-labelledby="tab-policies" x-data x-cloak>
       <div class="policy-toolbar">
-        <button type="button" id="btn-install-add" class="btn">Add installation</button>
-        <button type="button" id="btn-policy-add" class="btn ok">Add repository</button>
-        <button type="button" id="btn-policy-save" class="btn">Save policies</button>
-        <button type="button" id="btn-policy-reset" class="btn ghost">Reset</button>
-        <span class="policy-status muted" id="policy-status" aria-live="polite"></span>
+        <button type="button" class="btn" @click="$store.policies.addInstallation()">Add installation</button>
+        <button type="button" class="btn ok" @click="$store.policies.addRepository()">Add repository</button>
+        <button type="button" class="btn" :disabled="$store.policies.saving" :class="{ busy: $store.policies.saving }" @click="$store.policies.save()">Save policies</button>
+        <button type="button" class="btn ghost" @click="$store.policies.reset()">Reset</button>
+        <span class="policy-status muted" :class="$store.policies.statusKind" aria-live="polite" x-text="$store.policies.statusText"></span>
       </div>
-      <p class="policy-note" id="policy-note"></p>
+      <p class="policy-note" x-text="$store.policies.meta.broker_note"></p>
       <h2 class="policy-section-title">Global capacity</h2>
       <p class="policy-hint muted">
-        <code>max_active</code> é o teto global de runners ativos (warms + jobs em todos os repos).
-        Deve ser ≥ soma de <code>warm_capacity</code>. <code>pool_size</code> é a reserva de clones genéricos parados.
+        <code>max_active</code> is the global ceiling of active runners (warms + jobs across
+        all repos). Must be ≥ the sum of every <code>warm_capacity</code>.
+        <code>pool_size</code> is the reserve of generic idle clones.
       </p>
-      <div id="capacity-editor" class="policy-editor"></div>
+      <div class="policy-editor">
+        <article class="policy-card capacity-card">
+          <div class="policy-card-head">
+            <strong class="mono">Cluster capacity</strong>
+            <span class="muted mono" :class="{ warn: $store.policies.warmBudgetOver }" x-text="$store.policies.warmBudgetHint"></span>
+          </div>
+          <div class="policy-grid">
+            <label>Max active (global)
+              <input type="number" min="1" step="1" x-model.number="$store.policies.capacity.max_active" />
+            </label>
+            <label>Pool size (global)
+              <input type="number" min="0" step="1" x-model.number="$store.policies.capacity.pool_size" />
+            </label>
+          </div>
+          <p class="policy-hint muted" style="margin:0">
+            <code>max_active</code> must cover sum(warm_capacity) + pool_size — raise it
+            before increasing per-repo warm capacity or the global pool.
+          </p>
+        </article>
+      </div>
+
       <h2 class="policy-section-title">GitHub installations</h2>
-      <p class="policy-hint muted">Edite o <code>account</code> (handle/org), <code>installation_id</code> e scope. O repositório deve ter owner igual ao account.</p>
-      <div id="install-editor" class="policy-editor"></div>
+      <p class="policy-hint muted">Edit the <code>account</code> (handle/org), <code>installation_id</code>, and scope. The repository owner must match the account.</p>
+      <div class="policy-editor">
+        <template x-if="$store.policies.installations.length === 0">
+          <div class="empty">No installations yet. Click <strong>Add installation</strong>.</div>
+        </template>
+        <template x-for="(inst, index) in $store.policies.installations" :key="inst._id">
+          <article class="policy-card install-card">
+            <div class="policy-card-head">
+              <strong class="mono" x-text="`Installation #${index + 1}`"></strong>
+              <button type="button" class="btn ghost" @click="$store.policies.removeInstallation(index)">Remove</button>
+            </div>
+            <div class="policy-grid">
+              <label>Key
+                <input x-model="inst.key" placeholder="personal-or-org" />
+              </label>
+              <label>Account (handle/org)
+                <input x-model="inst.account" placeholder="acme" />
+              </label>
+              <label>Installation ID
+                <input type="number" min="1" step="1" x-model.number="inst.installation_id" placeholder="1234567" />
+              </label>
+              <label>Scope
+                <select x-model="inst.scope">
+                  <option value="repository">repository</option>
+                  <option value="organization">organization</option>
+                </select>
+              </label>
+              <label>Runner group ID
+                <input type="number" min="1" step="1" x-model.number="inst.runner_group_id" />
+              </label>
+            </div>
+          </article>
+        </template>
+      </div>
+
       <h2 class="policy-section-title">Repository policies</h2>
-      <div id="policy-editor" class="policy-editor"></div>
+      <div class="policy-editor">
+        <template x-if="$store.policies.repositories.length === 0">
+          <div class="empty">No policies yet. Click <strong>Add repository</strong>.</div>
+        </template>
+        <template x-for="(policy, index) in $store.policies.repositories" :key="policy._id">
+          <article class="policy-card repo-card">
+            <div class="policy-card-head">
+              <strong class="mono" x-text="`Policy #${index + 1}`"></strong>
+              <button type="button" class="btn ghost" @click="$store.policies.removeRepository(index)">Remove</button>
+            </div>
+            <div class="policy-grid">
+              <label>Repository
+                <input x-model="policy.repository" placeholder="Owner/Name" />
+              </label>
+              <label>Installation
+                <select x-model="policy.github_installation">
+                  <template x-if="$store.policies.installationNames.length === 0">
+                    <option value="">(add an installation)</option>
+                  </template>
+                  <template x-for="name in $store.policies.installationNames" :key="name">
+                    <option :value="name" x-text="$store.policies.installationLabel(name)"></option>
+                  </template>
+                </select>
+              </label>
+              <label>Default mode
+                <select x-model="policy.default_mode">
+                  <template x-for="mode in $store.policies.meta.mode_options" :key="mode">
+                    <option :value="mode" x-text="mode"></option>
+                  </template>
+                </select>
+              </label>
+              <label>Profile
+                <select x-model="policy.profile">
+                  <template x-for="name in $store.policies.profileNames" :key="name">
+                    <option :value="name" x-text="$store.policies.profileLabel(name)"></option>
+                  </template>
+                </select>
+              </label>
+              <label>Warm capacity
+                <input type="number" min="0" step="1" x-model.number="policy.warm_capacity" />
+              </label>
+              <label>Max concurrent <span class="muted">(0 = unlimited)</span>
+                <input type="number" min="0" step="1" x-model.number="policy.max_concurrent" />
+              </label>
+              <label>Warm idle floor <span class="muted">(-1 = disabled)</span>
+                <input type="number" min="-1" :max="policy.warm_capacity" step="1" x-model.number="policy.warm_idle_capacity" />
+              </label>
+              <label>Warm idle after (minutes)
+                <input type="number" min="0" step="5" x-model.number="policy.warm_idle_after_minutes" />
+              </label>
+            </div>
+            <p class="policy-hint muted" style="margin:0">
+              Warm idle: after this many minutes with no job request, warm supply drops
+              from <code>warm_capacity</code> to <code>warm_idle_capacity</code>, then
+              scales back up (one clone at a time) on the next request. Leave floor at
+              <code>-1</code> to keep warm_capacity fixed.
+            </p>
+            <div class="policy-checks">Allowed modes
+              <div class="check-row">
+                <template x-for="mode in $store.policies.meta.mode_options" :key="mode">
+                  <label class="inline"><input type="checkbox" :value="mode" x-model="policy.allowed_modes" /> <span x-text="mode"></span></label>
+                </template>
+              </div>
+            </div>
+            <div class="policy-checks">Allowed events
+              <div class="check-row">
+                <template x-for="event in $store.policies.meta.event_options" :key="event">
+                  <label class="inline"><input type="checkbox" :value="event" x-model="policy.allowed_events" /> <span x-text="event"></span></label>
+                </template>
+              </div>
+            </div>
+            <div class="policy-checks">Required labels
+              <div class="check-row">
+                <template x-for="label in $store.policies.meta.label_options" :key="label">
+                  <label class="inline"><input type="checkbox" :value="label" x-model="policy.required_labels" /> <span x-text="label"></span></label>
+                </template>
+              </div>
+            </div>
+          </article>
+        </template>
+      </div>
     </section>
   </main>
 
@@ -185,6 +319,7 @@
     <span>SSE live · Authelia on public host · API <code>/api/v1/*</code></span>
   </footer>
 
-  <script src="/ui/app.js"></script>
+  <script src="/ui/app.js" defer></script>
+  <script src="/ui/vendor/alpinejs-3.15.12.min.js" defer></script>
 </body>
 </html>
