@@ -522,6 +522,56 @@ def test_access_control_is_not_presented_as_dependency_health() -> None:
     assert "Admin access" not in html
 
 
+def test_webfonts_are_vendored_and_resolve() -> None:
+    """The no-external-request rule is the whole reason the fonts are in the
+    repo: a CDN reference works on the developer's laptop and renders nothing on
+    the air-gapped LAN this actually runs on. A missing FILE fails the same way,
+    silently, so every `url()` is resolved against the disk here."""
+    ui = ui_directory_for_test()
+    css = (ui / "css" / "tokens.css").read_text(encoding="utf-8")
+
+    referenced = re.findall(r'url\("([^"]+)"\)', css)
+    assert referenced, "no @font-face src found — the identity lost its type"
+    for ref in referenced:
+        assert not ref.startswith(("http", "//")), f"{ref} is an external request"
+        assert (ui / "css" / ref).resolve().is_file(), f"{ref} is referenced but not vendored"
+
+    # The system stack stays behind Plex, so a font that fails to load degrades
+    # to what shipped before rather than to a serif default.
+    assert '--sans: "IBM Plex Sans", ui-sans-serif, system-ui' in css
+    assert '--mono: "IBM Plex Mono", ui-monospace' in css
+
+
+def test_preloaded_fonts_match_the_urls_the_css_asks_for() -> None:
+    """A preload whose URL differs by even a query string is worse than none:
+    the browser downloads the file twice. asset_version() rewrites css/js/vendor
+    only, which is what keeps these two spellings identical -- so if that regex
+    ever grows `fonts`, this fails rather than quietly doubling the traffic."""
+    ui = ui_directory_for_test()
+    html = (ui / "index.html").read_text(encoding="utf-8")
+    css = (ui / "css" / "tokens.css").read_text(encoding="utf-8")
+
+    preloaded = re.findall(r'<link rel="preload" href="([^"]+)"[^>]*as="font"', html)
+    assert preloaded, "fonts are render-blocking; preload them"
+    css_urls = {ref.replace("../", "") for ref in re.findall(r'url\("([^"]+)"\)', css)}
+    for ref in preloaded:
+        assert "?" not in ref, f"{ref} carries a query the CSS url() will not have"
+        assert ref in css_urls, f"{ref} is preloaded but no @font-face uses it"
+        assert "crossorigin" in html.split(ref)[1].split(">")[0], (
+            f"{ref} needs crossorigin or the preload is discarded"
+        )
+
+
+def test_asset_versioning_leaves_font_urls_alone() -> None:
+    """Guards the assumption the preload test rests on, at the source."""
+    import inspect
+
+    from orchestrator import app as app_module
+
+    source = inspect.getsource(app_module.create_app)
+    assert r"(?:css|js|vendor)/" in source, "the version regex changed; recheck fonts"
+
+
 def test_the_product_is_named_consistently() -> None:
     """The name is `Orchestra`, capitalised, and the subtitle spells out what it
     orchestrates. Lowercase `orchestra` read as a stray word rather than a name."""
