@@ -487,16 +487,38 @@ def test_ui_reports_admin_state_from_the_field_the_api_sends() -> None:
     assert "admin_auth?.claimed" in html
 
 
-def test_ui_offers_sign_in_change_password_and_sign_out() -> None:
+def test_ui_gates_changes_behind_a_lock_not_an_account() -> None:
+    """There is no user, no session and no profile here -- one password that
+    enables changes. Borrowing "sign in / sign out" promises an identity model
+    that does not exist and sets the wrong expectation."""
     ui = ui_directory_for_test()
     html = (ui / "index.html").read_text(encoding="utf-8")
     js = (ui / "js" / "app.js").read_text(encoding="utf-8")
-    for hook in ("openSignIn", "openPasswordChange", "signOut"):
+
+    for hook in ("openUnlock", "openPasswordChange", "lock()"):
         assert hook in html, f"{hook} has no affordance in the UI"
+    for hook in ("openUnlock", "submitUnlock", "openPasswordChange", "canChange"):
         assert hook in js, f"{hook} is not implemented"
-    # The password must be able to persist beyond the tab, by explicit choice.
-    assert "Keep me signed in on this device" in html
+
+    assert "Sign in" not in html and "Sign out" not in html
+    assert "Unlock" in html and "Locked" in html
+    # Persistence beyond the tab stays an explicit, labelled choice.
+    assert "Stay unlocked on this device" in html
     assert "localStorage" in js
+
+
+def test_destructive_actions_are_disabled_while_locked() -> None:
+    """Letting them fire and 401 teaches nothing. Disabled with a reason does."""
+    html = (ui_directory_for_test() / "index.html").read_text(encoding="utf-8")
+    assert html.count(':disabled="!canChange"') >= 5
+    assert html.count(':title="lockReason"') >= 6
+
+
+def test_access_control_is_not_presented_as_dependency_health() -> None:
+    """It is neither a dependency nor a health signal; it lived on that page
+    only because it was convenient to put it there."""
+    html = (ui_directory_for_test() / "index.html").read_text(encoding="utf-8")
+    assert "Admin access" not in html
 
 
 def ui_directory_for_test():

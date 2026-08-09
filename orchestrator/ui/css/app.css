@@ -479,6 +479,30 @@ body { background: var(--canvas-sunken, var(--surface-sunken)); }
 .check { display: inline-flex; align-items: center; gap: var(--s-2); font-size: var(--fs-small); cursor: pointer; }
 .check input { accent-color: var(--accent); }
 
+/* ------------------------------------------------------------------ lock --- */
+/* No account, no session, no "who" -- one password that enables changes. The
+   lock is the honest metaphor for that, and a familiar one. */
+.lock { position: relative; }
+.lock__btn.is-unlocked { color: var(--accent); }
+.lock__menu {
+  position: absolute; right: 0; top: calc(100% + var(--s-2)); z-index: 30;
+  min-width: 15rem; padding: var(--s-2);
+  background: var(--surface); border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-panel); box-shadow: var(--shadow-pop);
+  animation: rise var(--t-fast) var(--ease);
+}
+.lock__note {
+  padding: var(--s-1) var(--s-2) var(--s-2);
+  font-size: var(--fs-micro); color: var(--text-faint); line-height: 1.4;
+  border-bottom: 1px solid var(--hairline); margin-bottom: var(--s-1);
+}
+.lock__item {
+  display: block; width: 100%; text-align: left;
+  padding: var(--s-2); border-radius: var(--r-control);
+  font-size: var(--fs-small); color: var(--text);
+}
+.lock__item:hover { background: var(--surface-raised); }
+
 /* ----------------------------------------------------------- connection --- */
 .conn {
   display: inline-flex; align-items: center; gap: var(--s-2);

@@ -124,22 +124,35 @@
           <span>Search</span><span class="kbd">⌘K</span>
         </button>
         <template x-if="overview.admin_auth?.claimed">
-          <button class="btn btn--ghost" @click="hasToken ? openPasswordChange() : openSignIn()"
-                  :title="hasToken
-                    ? (rememberMe ? 'Signed in — saved on this device' : 'Signed in — this tab only')
-                    : 'Sign in to use admin actions'">
-            <!-- SVG, not an emoji: the emoji lock renders as tofu in several
-                 of the font stacks this dashboard runs under. -->
-            <svg width="12" height="14" viewBox="0 0 12 14" aria-hidden="true"
-                 fill="none" stroke="currentColor" stroke-width="1.4">
-              <rect x="1.2" y="6" width="9.6" height="7" rx="1.6"/>
-              <path :d="hasToken ? 'M3.6 6V3.8a2.4 2.4 0 0 1 4.6-.9' : 'M3.6 6V3.8a2.4 2.4 0 0 1 4.8 0V6'"/>
-            </svg>
-            <span x-text="hasToken ? 'Signed in' : 'Sign in'"></span>
-          </button>
-        </template>
-        <template x-if="hasToken">
-          <button class="btn btn--ghost" @click="signOut()" title="Sign out">Sign out</button>
+          <!-- The outside-click handler belongs on the wrapper: on the menu itself,
+                 the click that opens it already counts as "outside" and closes it
+                 again in the same gesture. -->
+            <div class="lock" @keydown.escape="lockMenu = false"
+                 @click.outside="lockMenu = false">
+            <button class="btn btn--ghost lock__btn" :class="{ 'is-unlocked': isUnlocked }"
+                    @click="isUnlocked ? (lockMenu = !lockMenu) : openUnlock()"
+                    :aria-expanded="isUnlocked ? lockMenu : false"
+                    :title="isUnlocked
+                      ? (stayUnlocked ? 'Unlocked on this device' : 'Unlocked for this tab')
+                      : 'Unlock to make changes'">
+              <svg width="12" height="14" viewBox="0 0 12 14" aria-hidden="true"
+                   fill="none" stroke="currentColor" stroke-width="1.4">
+                <rect x="1.2" y="6" width="9.6" height="7" rx="1.6"/>
+                <path :d="isUnlocked ? 'M3.6 6V3.8a2.4 2.4 0 0 1 4.6-.9' : 'M3.6 6V3.8a2.4 2.4 0 0 1 4.8 0V6'"/>
+              </svg>
+              <span x-text="isUnlocked ? 'Unlocked' : 'Locked'"></span>
+            </button>
+            <template x-if="lockMenu">
+              <div class="lock__menu">
+                <p class="lock__note"
+                   x-text="stayUnlocked
+                     ? 'Unlocked on this device until you lock it again.'
+                     : 'Unlocked for this tab. Closing it locks again.'"></p>
+                <button class="lock__item" @click="openPasswordChange()">Change password…</button>
+                <button class="lock__item" @click="lock()">Lock now</button>
+              </div>
+            </template>
+          </div>
         </template>
         <button class="btn btn--ghost" @click="cycleTheme()"
                 :aria-label="'Theme: ' + theme" :title="'Theme: ' + theme">
@@ -169,9 +182,9 @@
           <div class="panel__body">
             <p class="meter__note" style="max-width:60ch">
               Anything that can reach this port can currently drain the cluster,
-              rewrite repository policy or destroy a container. Choose an admin
-              password and those actions will ask for it. Nothing is written to the
-              host and nothing needs restarting.
+              rewrite repository policy or destroy a container. Set an admin
+              password and those actions stay locked until it is entered. Nothing
+              is written to the host and nothing needs restarting.
             </p>
 
             <template x-if="setup.can_claim">
@@ -423,8 +436,10 @@
             </div>
             <div style="flex:1"></div>
             <button class="btn" :class="{ 'is-busy': busy === 'Reconcile' }"
+                    :disabled="!canChange" :title="lockReason"
                     @click="adminAction('Reconcile', '/api/v1/admin/reconcile')">Reconcile</button>
             <button class="btn" :class="{ 'is-busy': busy === 'Recycle ready' }"
+                    :disabled="!canChange" :title="lockReason"
                     @click="adminAction('Recycle ready', '/api/v1/admin/recycle-ready')">Recycle ready</button>
           </div>
 
@@ -463,8 +478,8 @@
                     <td>
                       <span class="row-actions">
                         <button class="btn btn--sm" @click="drawer = r">Inspect</button>
-                        <button class="btn btn--sm btn--danger"
-                                @click="destroyInstance(r, false)">Destroy</button>
+                        <button class="btn btn--sm btn--danger" :disabled="!canChange"
+                                :title="lockReason" @click="destroyInstance(r, false)">Destroy</button>
                       </span>
                     </td>
                   </tr>
@@ -766,50 +781,6 @@
           </template>
         </div>
 
-        <section class="panel">
-          <header class="panel__head">
-            <h2 class="panel__title">Admin access</h2>
-            <span class="panel__meta">
-              <span class="status"
-                    :class="overview.admin_auth?.claimed ? 's-ready' : 's-failed'">
-                <span class="status__glyph" aria-hidden="true"
-                      x-text="overview.admin_auth?.claimed ? '●' : '✕'"></span>
-                <span x-text="overview.admin_auth?.claimed ? 'protected' : 'unprotected'"></span>
-              </span>
-            </span>
-          </header>
-          <div class="panel__body">
-            <dl class="kv">
-              <dt>This instance</dt>
-              <dd x-text="overview.admin_auth?.claimed
-                    ? 'Admin actions require the password.'
-                    : 'No password set — anything that reaches this port can change things.'"></dd>
-              <dt>This browser</dt>
-              <dd x-text="!hasToken
-                    ? 'Not signed in. Admin actions will ask for the password.'
-                    : rememberMe
-                      ? 'Signed in, saved on this device until you sign out.'
-                      : 'Signed in for this tab only. Closing it signs you out.'"></dd>
-            </dl>
-            <p class="meter__note" style="margin-top:var(--s-3);max-width:60ch">
-              Signing in just keeps the password in this browser so drain, policy
-              changes and container destroy stop asking for it each time. It is
-              never sent anywhere except to this orchestrator, and the server
-              stores only a hash of it.
-            </p>
-            <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);flex-wrap:wrap">
-              <template x-if="!hasToken">
-                <button class="btn btn--primary" @click="openSignIn()">Sign in</button>
-              </template>
-              <template x-if="hasToken">
-                <button class="btn" @click="openPasswordChange()">Change password</button>
-              </template>
-              <template x-if="hasToken">
-                <button class="btn btn--ghost" @click="signOut()">Sign out</button>
-              </template>
-            </div>
-          </div>
-        </section>
       </div>
     </template>
 
@@ -881,8 +852,8 @@
                       x-text="driftSelection.length + ' of ' + driftItems().length + ' selected'"></span>
                 <div style="flex:1"></div>
                 <button class="btn btn--sm" @click="driftSelection = []">Clear</button>
-                <button class="btn btn--danger" :disabled="!driftSelection.length"
-                        @click="applyDrift()">Apply repair</button>
+                <button class="btn btn--danger" :disabled="!driftSelection.length || !canChange"
+                        :title="lockReason" @click="applyDrift()">Apply repair</button>
               </div>
             </div>
           </template>
@@ -987,8 +958,8 @@
                       </td>
                       <td>
                         <span class="row-actions">
-                          <button class="btn btn--sm btn--danger"
-                                  @click="purgeCache(c.repository)">Purge</button>
+                          <button class="btn btn--sm btn--danger" :disabled="!canChange"
+                                  :title="lockReason" @click="purgeCache(c.repository)">Purge</button>
                         </span>
                       </td>
                     </tr>
@@ -1015,8 +986,8 @@
             <button class="btn" @click="$store.policies.addRepository()">Add repository</button>
             <div style="flex:1"></div>
             <button class="btn btn--ghost" @click="$store.policies.reset()">Reset</button>
-            <button class="btn btn--primary" :disabled="$store.policies.saving"
-                    :class="{ 'is-busy': $store.policies.saving }"
+            <button class="btn btn--primary" :disabled="$store.policies.saving || !canChange"
+                    :class="{ 'is-busy': $store.policies.saving }" :title="lockReason"
                     @click="$store.policies.save()">Save policies</button>
           </div>
           <div class="panel__body">
@@ -1225,8 +1196,10 @@
           </template>
         </div>
         <footer class="drawer__foot">
-          <button class="btn btn--danger" @click="destroyInstance(drawer, false)">Destroy</button>
-          <button class="btn btn--danger" @click="destroyInstance(drawer, true)">Force destroy</button>
+          <button class="btn btn--danger" :disabled="!canChange" :title="lockReason"
+                  @click="destroyInstance(drawer, false)">Destroy</button>
+          <button class="btn btn--danger" :disabled="!canChange" :title="lockReason"
+                  @click="destroyInstance(drawer, true)">Force destroy</button>
           <div style="flex:1"></div>
           <button class="btn" @click="drawer = null">Close</button>
         </footer>
@@ -1257,40 +1230,41 @@
     </div>
   </template>
 
-  <!-- ═══════════════════════════════════════════════════════════ sign in ══ -->
-  <template x-if="auth.open">
+  <!-- ════════════════════════════════════════════════════════════ unlock ══ -->
+  <template x-if="unlockForm.open">
     <div class="modal">
-      <div class="scrim" @click="auth.open = false"></div>
-      <div class="modal__card" role="dialog" aria-modal="true" aria-labelledby="signin-title">
+      <div class="scrim" @click="unlockForm.open = false"></div>
+      <div class="modal__card" role="dialog" aria-modal="true" aria-labelledby="unlock-title">
         <header class="modal__head">
-          <h2 class="panel__title" id="signin-title">Sign in</h2>
+          <h2 class="panel__title" id="unlock-title">Unlock to make changes</h2>
         </header>
-        <form class="modal__body" @submit.prevent="submitSignIn()">
+        <form class="modal__body" @submit.prevent="submitUnlock()">
           <p class="meter__note" style="margin-bottom:var(--s-3)">
-            The admin password for this orchestrator. It stays in your browser so
-            admin actions stop asking each time.
+            Drain, policy changes and container destroy are locked. Enter the
+            admin password for this orchestrator to enable them.
           </p>
           <div class="field">
-            <label class="field__label" for="signin-password">Admin password</label>
-            <input id="signin-password" class="input" type="password"
-                   autocomplete="current-password" x-model="auth.password">
+            <label class="field__label" for="unlock-password">Admin password</label>
+            <input id="unlock-password" class="input" type="password"
+                   autocomplete="current-password" x-model="unlockForm.password">
           </div>
           <label class="check" style="margin-top:var(--s-3)">
-            <input type="checkbox" x-model="auth.remember">
-            <span>Keep me signed in on this device</span>
+            <input type="checkbox" x-model="unlockForm.remember">
+            <span>Stay unlocked on this device</span>
           </label>
           <p class="meter__note" style="margin-top:var(--s-1)"
-             x-text="auth.remember
-               ? 'Stored until you sign out. Use only on a machine you trust.'
-               : 'Stored for this tab only — closing it signs you out.'"></p>
-          <template x-if="auth.error">
-            <p class="well" style="margin-top:var(--s-3);color:var(--bad)" x-text="auth.error"></p>
+             x-text="unlockForm.remember
+               ? 'Stays unlocked until you lock it again. Use only on a machine you trust.'
+               : 'Locks again when you close this tab.'"></p>
+          <template x-if="unlockForm.error">
+            <p class="well" style="margin-top:var(--s-3);color:var(--bad)" x-text="unlockForm.error"></p>
           </template>
           <div class="modal__foot" style="padding-inline:0;padding-bottom:0;border:none">
-            <button class="btn" type="button" @click="auth.open = false">Cancel</button>
+            <button class="btn" type="button" @click="unlockForm.open = false">Cancel</button>
             <button class="btn btn--primary" type="submit"
-                    :class="{ 'is-busy': auth.busy }" :disabled="!auth.password || auth.busy">
-              Sign in
+                    :class="{ 'is-busy': unlockForm.busy }"
+                    :disabled="!unlockForm.password || unlockForm.busy">
+              Unlock
             </button>
           </div>
         </form>
