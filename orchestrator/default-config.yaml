@@ -116,16 +116,18 @@ storage:
   # If the storage reading itself fails, allow clones rather than halting CI.
   fail_open: true
 
-# Protection for POST/PUT /api/v1/admin/*. Without a token these routes are
-# open to anything that can reach the port — drain, policy rewrite, cache
-# purge, container destroy.
-api:
-  # Provide via a systemd credential, e.g.
-  #   LoadCredential=runner_orchestrator_admin_token:/etc/runner-orchestrator/admin-token
-  admin_token_file: ""
-  # Leave true only while migrating; the dashboard shows a standing alert while
-  # it is. Set false once a token is provisioned.
-  allow_unauthenticated_admin: true
+# Protection for POST/PUT /api/v1/admin/*.
+#
+# Nothing to do here for normal use. On first start the dashboard shows a setup
+# panel; the password you choose there is hashed and stored by the orchestrator
+# itself, beside the database. No secret to place on disk, no unit file to edit,
+# no restart. Setup is only accepted while the instance is unclaimed and within
+# the first 30 minutes of start, so an instance left running is not sitting
+# there waiting to be adopted.
+#
+# api:
+#   # Only to put the stored credential somewhere other than beside the database.
+#   admin_token_file: ""
 
 profiles:
   crossbuild-small:

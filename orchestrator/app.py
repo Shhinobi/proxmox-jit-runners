@@ -35,7 +35,7 @@ from .api import (
     set_drain,
     ui_directory,
 )
-from .auth import admin_auth_status, make_admin_dependency
+from .auth import AdminCredential, credential_path, make_admin_dependency
 from .broker import BrokerClient
 from .config import Settings, load_settings, projected_disk_demand_gb
 from .db import Database
@@ -130,7 +130,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/overview")
     async def api_overview() -> dict[str, object]:
-        return await build_overview(orchestrator, orchestrator.settings)
+        return await build_overview(
+            orchestrator, orchestrator.settings, admin_auth=credential.status()
+        )
 
     @app.get("/api/v1/instances")
     async def api_instances(
@@ -194,6 +196,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await build_dashboard_snapshot(
             orchestrator,
             orchestrator.settings,
+            admin_auth=credential.status(),
             job_limit=limit,
             status=status_filter,
             repository=repository,
@@ -216,6 +219,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 snapshot = await build_dashboard_snapshot(
                     orchestrator,
                     orchestrator.settings,
+                    admin_auth=credential.status(),
                     job_limit=limit,
                     status=status_filter,
                     repository=repository,
@@ -236,7 +240,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     # Guarded as a group: adding a route here inherits the credential check.
-    admin = APIRouter(dependencies=[Depends(make_admin_dependency(cfg))])
+    credential = AdminCredential(credential_path(cfg))
+    app.state.admin_credential = credential
+    admin = APIRouter(dependencies=[Depends(make_admin_dependency(credential))])
 
     @admin.post("/api/v1/admin/drain")
     async def admin_drain() -> dict[str, object]:
@@ -498,6 +504,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "projected_demand_bytes": demand_gb * 1024**3,
         }
 
+    @app.get("/api/v1/setup")
+    async def setup_state() -> dict[str, object]:
+        """Whether this instance still needs an admin password."""
+        return credential.status()
+
+    @app.post("/api/v1/setup/claim")
+    async def setup_claim(request: Request) -> dict[str, object]:
+        """Set the admin password. Open only while unclaimed and in-window."""
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        password = str((body or {}).get("password", ""))
+        try:
+            credential.claim(password)
+        except PermissionError as exc:
+            # 409, not 403: the request was well-formed, the instance is simply
+            # no longer in a state where it can be claimed.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "message": "Admin password set. Keep it somewhere safe."}
+
+    @admin.post("/api/v1/admin/password")
+    async def change_password(request: Request) -> dict[str, object]:
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+        try:
+            credential.change(
+                str((body or {}).get("current", "")), str((body or {}).get("new", ""))
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "message": "Admin password changed."}
+
     @app.get("/api/v1/dependencies")
     async def dependencies_report() -> dict[str, object]:
         return {
@@ -509,7 +554,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 **(orchestrator.dependencies.get("github_api") or {}),
             },
             "pending_deregistrations": await orchestrator.db.count_pending_deregistrations(),
-            "admin_auth": admin_auth_status(orchestrator.settings),
+            "admin_auth": credential.status(),
         }
 
     # Registered last so every admin route defined above is included, and

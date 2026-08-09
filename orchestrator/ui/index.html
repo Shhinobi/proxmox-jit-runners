@@ -101,7 +101,8 @@
           overview:'Overview', runners:'Runners', jobs:'Jobs', webhooks:'Webhook deliveries',
           capacity:'Capacity &amp; storage', dependencies:'Dependency health', drift:'Drift',
           logs:'Logs', cache:'Build cache', policies:'Policies'
-        }[route] ?? 'Overview'"></h1>
+        }[route] ?? 'Overview'" x-show="!needsSetup"></h1>
+        <h1 class="topbar__title" x-show="needsSetup" x-cloak>First-run setup</h1>
         <p class="topbar__sub">
           <span x-text="overview.proxmox?.node ?? ''"></span>
           <template x-if="overview.reconcile?.last_success_age_seconds != null">
@@ -133,6 +134,61 @@
       </div>
     </header>
 
+    <!-- ───────────────────────────────────────────────────── first run ── -->
+    <template x-if="snap && needsSetup">
+      <div class="page">
+        <section class="panel setup">
+          <header class="panel__head">
+            <h2 class="panel__title">Secure this instance</h2>
+            <span class="panel__meta"
+                  x-text="setup.can_claim
+                    ? `setup open for ${fmt.age(setup.claim_window_seconds)}`
+                    : 'setup window closed'"></span>
+          </header>
+          <div class="panel__body">
+            <p class="meter__note" style="max-width:60ch">
+              Anything that can reach this port can currently drain the cluster,
+              rewrite repository policy or destroy a container. Choose an admin
+              password and those actions will ask for it. Nothing is written to the
+              host and nothing needs restarting.
+            </p>
+
+            <template x-if="setup.can_claim">
+              <form class="setup__form" @submit.prevent="claimInstance()">
+                <div class="field" style="max-width:24rem">
+                  <label class="field__label" for="setup-pw">Admin password</label>
+                  <input id="setup-pw" class="input" type="password" autocomplete="new-password"
+                         minlength="12" x-model="setupForm.password"
+                         placeholder="at least 12 characters">
+                </div>
+                <div class="field" style="max-width:24rem">
+                  <label class="field__label" for="setup-pw2">Confirm</label>
+                  <input id="setup-pw2" class="input" type="password" autocomplete="new-password"
+                         x-model="setupForm.confirm">
+                </div>
+                <button class="btn btn--primary" type="submit"
+                        :disabled="setupForm.password.length < 12
+                                   || setupForm.password !== setupForm.confirm">
+                  Set password
+                </button>
+                <p class="meter__note"
+                   x-show="setupForm.confirm && setupForm.password !== setupForm.confirm"
+                   style="color:var(--warn)">The two entries do not match.</p>
+              </form>
+            </template>
+
+            <template x-if="!setup.can_claim">
+              <p class="well">
+                The first-run window has closed. Restart the service to reopen it —
+                that requires access to the host, which is the point: it stops an
+                instance left running from being adopted by whoever finds it.
+              </p>
+            </template>
+          </div>
+        </section>
+      </div>
+    </template>
+
     <!-- ─────────────────────────────────────────────────────── loading ── -->
     <template x-if="!snap">
       <div class="page">
@@ -150,7 +206,7 @@
     </template>
 
     <!-- ═════════════════════════════════════════════════════════ OVERVIEW ══ -->
-    <template x-if="snap && route === 'overview'">
+    <template x-if="snap && !needsSetup && route === 'overview'">
       <div class="page">
         <section class="meters" aria-label="Key metrics">
           <template x-for="m in meters" :key="m.label">
@@ -308,7 +364,7 @@
     </template>
 
     <!-- ══════════════════════════════════════════════════════════ RUNNERS ══ -->
-    <template x-if="snap && route === 'runners'">
+    <template x-if="snap && !needsSetup && route === 'runners'">
       <div class="page">
         <section class="panel">
           <div class="table-toolbar">
@@ -427,7 +483,7 @@
     </template>
 
     <!-- ═════════════════════════════════════════════════════════════ JOBS ══ -->
-    <template x-if="snap && route === 'jobs'">
+    <template x-if="snap && !needsSetup && route === 'jobs'">
       <div class="page">
         <section class="panel">
           <header class="panel__head">
@@ -476,11 +532,8 @@
                     <td x-text="j.mode ?? '—'"></td>
                     <td>
                       <template x-if="j.start_source">
-                        <span class="status"
-                              :class="j.start_source === 'warm' ? 's-ready'
-                                     : j.start_source === 'pool' ? 's-running' : 's-idle'">
-                          <span class="status__glyph" aria-hidden="true"
-                                x-text="j.start_source === 'cold' ? '◐' : '●'"></span>
+                        <span class="tag" :title="'runner source: ' + j.start_source">
+                          <span class="tag__dot" :class="'is-' + j.start_source"></span>
                           <span x-text="j.start_source"></span>
                         </span>
                       </template>
@@ -513,7 +566,7 @@
     </template>
 
     <!-- ═════════════════════════════════════════════════════════ WEBHOOKS ══ -->
-    <template x-if="snap && route === 'webhooks'">
+    <template x-if="snap && !needsSetup && route === 'webhooks'">
       <div class="page">
         <section class="panel">
           <header class="panel__head">
@@ -556,7 +609,7 @@
     </template>
 
     <!-- ═════════════════════════════════════════════════════════ CAPACITY ══ -->
-    <template x-if="snap && route === 'capacity'">
+    <template x-if="snap && !needsSetup && route === 'capacity'">
       <div class="page">
         <section class="panel">
           <header class="panel__head">
@@ -655,7 +708,7 @@
     </template>
 
     <!-- ═════════════════════════════════════════════════════ DEPENDENCIES ══ -->
-    <template x-if="snap && route === 'dependencies'">
+    <template x-if="snap && !needsSetup && route === 'dependencies'">
       <div class="page">
         <div class="grid-2">
           <template x-for="d in deps" :key="d.name">
@@ -713,7 +766,7 @@
     </template>
 
     <!-- ════════════════════════════════════════════════════════════ DRIFT ══ -->
-    <template x-if="snap && route === 'drift'">
+    <template x-if="snap && !needsSetup && route === 'drift'">
       <div class="page">
         <section class="panel">
           <header class="panel__head">
@@ -790,7 +843,7 @@
     </template>
 
     <!-- ═════════════════════════════════════════════════════════════ LOGS ══ -->
-    <template x-if="snap && route === 'logs'">
+    <template x-if="snap && !needsSetup && route === 'logs'">
       <div class="page">
         <section class="panel">
           <div class="table-toolbar">
@@ -850,7 +903,7 @@
     </template>
 
     <!-- ════════════════════════════════════════════════════════════ CACHE ══ -->
-    <template x-if="snap && route === 'cache'">
+    <template x-if="snap && !needsSetup && route === 'cache'">
       <div class="page">
         <section class="panel">
           <header class="panel__head">
@@ -901,7 +954,7 @@
     </template>
 
     <!-- ═════════════════════════════════════════════════════════ POLICIES ══ -->
-    <template x-if="snap && route === 'policies'">
+    <template x-if="snap && !needsSetup && route === 'policies'">
       <div class="page" data-policies>
         <section class="panel">
           <header class="panel__head">

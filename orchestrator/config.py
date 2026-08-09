@@ -127,12 +127,16 @@ class CacheConfig:
 
 @dataclass(frozen=True)
 class ApiConfig:
-    """Protection for the mutating API surface."""
+    """Protection for the mutating API surface.
+
+    There is nothing to configure for normal use: the admin password is set
+    from the dashboard on first run and the orchestrator stores its own hash.
+    This only exists to relocate that file.
+    """
 
     admin_token_file: str = ""
-    allow_unauthenticated_admin: bool = True
-    """Permitted for one release so an existing deployment does not break on
-    restart; flipped to False once operators have provisioned a token."""
+    """Optional path override for the stored credential. Empty means beside the
+    database, which the service already owns and can write."""
 
 
 @dataclass(frozen=True)
@@ -720,7 +724,6 @@ def load_settings(path: str | Path | None = None) -> Settings:
             str(api_raw.get("admin_token_file", "")),
             "RUNNER_ORCHESTRATOR_ADMIN_TOKEN_FILE",
         ),
-        allow_unauthenticated_admin=bool(api_raw.get("allow_unauthenticated_admin", True)),
     )
     # Warning, not an error, by default. `load_settings()` runs at import via
     # `create_app()`, so a new hard failure here would brick a running

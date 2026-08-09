@@ -304,74 +304,75 @@ def test_snapshot_route_returns_dashboard_payload(admin_test_client: TestClient)
     assert "instances" in response.json()
 
 
-# --- Admin authentication (RJIT-009) -----------------------------------------
+# --- Admin setup and authentication ------------------------------------------
 
 
-def _build_authed_client(tmp_dir: str, token: str) -> TestClient:
-    """A client whose app has an admin token provisioned."""
-    from orchestrator.config import ApiConfig
-
+def _setup_client(tmp_dir: str) -> tuple[TestClient, Any]:
+    """A client on a fresh, unclaimed instance."""
     secret_path = Path(tmp_dir) / "webhook-secret"
     secret_path.write_text("test-secret", encoding="utf-8")
-    token_path = Path(tmp_dir) / "admin-token"
-    token_path.write_text(token, encoding="utf-8")
     base = settings(database_path=str(Path(tmp_dir) / "state.db"), shadow_mode=True)
-    cfg = replace(
-        base,
-        github=replace(base.github, webhook_secret_file=str(secret_path)),
-        api=ApiConfig(admin_token_file=str(token_path), allow_unauthenticated_admin=False),
-    )
+    cfg = replace(base, github=replace(base.github, webhook_secret_file=str(secret_path)))
     app = create_app(cfg)
     orchestrator: Orchestrator = app.state.orchestrator
     asyncio.run(orchestrator.db.initialize())
     orchestrator.github = cast(Any, FakeGitHub())
     orchestrator.proxmox = cast(Any, FakeProxmox())
     orchestrator.broker = cast(Any, FakeBroker())
-    return TestClient(app)
+    return TestClient(app), app.state.admin_credential
 
 
-def test_admin_route_rejects_a_missing_token(tmp_path: Path) -> None:
-    """Anything that could reach the port could previously drain the cluster."""
-    client = _build_authed_client(str(tmp_path), "s3cret")
-    assert client.post("/api/v1/admin/drain").status_code == 401
+def test_a_fresh_instance_reports_itself_unclaimed(tmp_path: Path) -> None:
+    client, _ = _setup_client(str(tmp_path))
+    body = client.get("/api/v1/setup").json()
+    assert body["claimed"] is False
+    assert body["can_claim"] is True
+    assert body["claim_window_seconds"] > 0
 
 
-def test_admin_route_rejects_a_wrong_token(tmp_path: Path) -> None:
-    client = _build_authed_client(str(tmp_path), "s3cret")
-    response = client.post("/api/v1/admin/drain", headers={"X-Admin-Token": "nope"})
-    assert response.status_code == 401
+def test_claiming_sets_the_password_without_touching_the_host(tmp_path: Path) -> None:
+    """The whole point: setup happens in the app, not in a shell."""
+    client, credential = _setup_client(str(tmp_path))
+
+    response = client.post("/api/v1/setup/claim", json={"password": "correct-horse-battery"})
+
+    assert response.status_code == 200
+    assert credential.is_claimed
+    assert client.get("/api/v1/setup").json()["claimed"] is True
 
 
-def test_admin_route_accepts_bearer_and_header_forms(tmp_path: Path) -> None:
-    client = _build_authed_client(str(tmp_path), "s3cret")
-    # DRAIN_MARKER defaults to a system path this suite cannot write.
-    marker = tmp_path / "drain"
-    with (
-        mock.patch("orchestrator.api.DRAIN_MARKER", marker),
-        mock.patch("orchestrator.service.DRAIN_MARKER", marker),
-    ):
-        assert (
-            client.post("/api/v1/admin/drain", headers={"X-Admin-Token": "s3cret"}).status_code
-            == 200
-        )
-        assert (
-            client.post(
-                "/api/v1/admin/resume", headers={"Authorization": "Bearer s3cret"}
-            ).status_code
-            == 200
-        )
+def test_a_claimed_instance_cannot_be_claimed_again(tmp_path: Path) -> None:
+    """Otherwise the setup endpoint is a permanent password reset for anyone."""
+    client, _ = _setup_client(str(tmp_path))
+    client.post("/api/v1/setup/claim", json={"password": "correct-horse-battery"})
+
+    again = client.post("/api/v1/setup/claim", json={"password": "someone-elses-choice"})
+
+    assert again.status_code == 409
 
 
-def test_read_endpoints_stay_unauthenticated(tmp_path: Path) -> None:
-    """The dashboard is read-mostly and sits behind a reverse proxy."""
-    client = _build_authed_client(str(tmp_path), "s3cret")
-    assert client.get("/api/v1/overview").status_code == 200
-    assert client.get("/api/v1/dependencies").status_code == 200
+def test_claiming_closes_after_the_first_run_window(tmp_path: Path) -> None:
+    """An instance left running for weeks must not still be adoptable."""
+    import time as _time
+
+    from orchestrator.auth import CLAIM_WINDOW_SECONDS
+
+    client, credential = _setup_client(str(tmp_path))
+    credential.started_at = _time.monotonic() - CLAIM_WINDOW_SECONDS - 1
+
+    assert client.get("/api/v1/setup").json()["can_claim"] is False
+    response = client.post("/api/v1/setup/claim", json={"password": "too-late-to-claim"})
+    assert response.status_code == 409
 
 
-def test_unconfigured_token_still_allows_admin_during_migration(tmp_path: Path) -> None:
-    """Defaults must not brick a running deployment on its next restart."""
-    client, _ = _build_client(str(tmp_path))
+def test_short_passwords_are_refused(tmp_path: Path) -> None:
+    client, _ = _setup_client(str(tmp_path))
+    assert client.post("/api/v1/setup/claim", json={"password": "short"}).status_code == 400
+
+
+def test_admin_routes_open_until_claimed_then_require_the_password(tmp_path: Path) -> None:
+    """Unclaimed cannot mean locked out -- there would be no way back in."""
+    client, _ = _setup_client(str(tmp_path))
     marker = tmp_path / "drain"
     with (
         mock.patch("orchestrator.api.DRAIN_MARKER", marker),
@@ -379,10 +380,83 @@ def test_unconfigured_token_still_allows_admin_during_migration(tmp_path: Path) 
     ):
         assert client.post("/api/v1/admin/drain").status_code == 200
 
+        client.post("/api/v1/setup/claim", json={"password": "correct-horse-battery"})
 
-def test_dependencies_endpoint_reports_auth_posture(tmp_path: Path) -> None:
-    """Unauthenticated admin must be visible, never silently on."""
-    client, _ = _build_client(str(tmp_path))
-    body = client.get("/api/v1/dependencies").json()
-    assert body["admin_auth"]["enabled"] is False
-    assert body["admin_auth"]["allow_unauthenticated"] is True
+        assert client.post("/api/v1/admin/resume").status_code == 401
+        assert (
+            client.post(
+                "/api/v1/admin/resume", headers={"X-Admin-Token": "correct-horse-battery"}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/api/v1/admin/drain",
+                headers={"Authorization": "Bearer correct-horse-battery"},
+            ).status_code
+            == 200
+        )
+
+
+def test_wrong_password_is_rejected(tmp_path: Path) -> None:
+    client, _ = _setup_client(str(tmp_path))
+    client.post("/api/v1/setup/claim", json={"password": "correct-horse-battery"})
+
+    response = client.post("/api/v1/admin/drain", headers={"X-Admin-Token": "guess"})
+
+    assert response.status_code == 401
+
+
+def test_password_can_be_changed_from_the_running_app(tmp_path: Path) -> None:
+    client, credential = _setup_client(str(tmp_path))
+    client.post("/api/v1/setup/claim", json={"password": "correct-horse-battery"})
+    headers = {"X-Admin-Token": "correct-horse-battery"}
+
+    assert (
+        client.post(
+            "/api/v1/admin/password",
+            headers=headers,
+            json={"current": "wrong-one-entirely", "new": "another-long-password"},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/api/v1/admin/password",
+            headers=headers,
+            json={"current": "correct-horse-battery", "new": "another-long-password"},
+        ).status_code
+        == 200
+    )
+    # The new password is live and the old one is dead.
+    assert credential.verify("another-long-password")
+    assert not credential.verify("correct-horse-battery")
+
+
+def test_the_credential_file_never_holds_the_password(tmp_path: Path) -> None:
+    """A stolen file must not hand over the password itself."""
+    client, credential = _setup_client(str(tmp_path))
+    client.post("/api/v1/setup/claim", json={"password": "correct-horse-battery"})
+
+    raw = credential.path.read_text(encoding="utf-8")
+
+    assert "correct-horse-battery" not in raw
+    assert credential.verify("correct-horse-battery")
+    assert not credential.verify("correct-horse-batteru")
+    assert oct(credential.path.stat().st_mode)[-3:] == "600"
+
+
+def test_read_endpoints_stay_unauthenticated(tmp_path: Path) -> None:
+    """The dashboard is read-mostly and sits behind a reverse proxy."""
+    client, _ = _setup_client(str(tmp_path))
+    client.post("/api/v1/setup/claim", json={"password": "correct-horse-battery"})
+    assert client.get("/api/v1/overview").status_code == 200
+    assert client.get("/api/v1/dependencies").status_code == 200
+
+
+def test_dependencies_endpoint_reports_setup_state(tmp_path: Path) -> None:
+    """Unclaimed must be visible, never silently open."""
+    client, _ = _setup_client(str(tmp_path))
+    assert client.get("/api/v1/dependencies").json()["admin_auth"]["claimed"] is False
+    client.post("/api/v1/setup/claim", json={"password": "correct-horse-battery"})
+    assert client.get("/api/v1/dependencies").json()["admin_auth"]["claimed"] is True

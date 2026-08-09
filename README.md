@@ -117,13 +117,17 @@ implements itself:
 | Health & metrics | `GET /health/live`, `GET /health/ready`, `GET /metrics` (Prometheus) |
 | GitHub webhook | `POST /webhooks/github` (HMAC-signed `workflow_job` events) |
 
-The dashboard doesn't implement its own login — put it behind a reverse
-proxy or auth layer (e.g. Authelia, Tailscale) unless it's only reachable
-on a trusted network. The **mutating** routes (`POST`/`PUT` under
-`/api/v1/admin/`) additionally take a shared token: set
-`api.admin_token_file` to a file (a systemd credential works well) and send
-it as `X-Admin-Token` or `Authorization: Bearer`. Until you do, they stay
-open and the dashboard shows a standing alert saying so.
+The dashboard doesn't implement its own login — put it behind a reverse proxy
+or auth layer (e.g. Authelia, Tailscale) unless it's only reachable on a trusted
+network.
+
+The **mutating** routes (`POST`/`PUT` under `/api/v1/admin/`) protect themselves
+separately, and you set that up in the app: on first start the dashboard shows a
+setup panel where you choose an admin password. The orchestrator hashes and
+stores it itself — there's no secret to place on disk and nothing to restart.
+Setup is accepted only while the instance is unclaimed and only within the first
+30 minutes after start, so an instance left running isn't waiting to be adopted
+by whoever finds the port. Miss the window and a restart reopens it.
 
 ## Development
 

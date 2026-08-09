@@ -25,7 +25,8 @@
   --canvas-alt:      #F4F6F9;   /* the rail, table headers */
   --surface:         #FFFFFF;   /* panels, cards */
   --surface-raised:  #F4F6F9;   /* rows on hover, inputs, chips */
-  --surface-sunken:  #EEF1F5;   /* wells, code blocks, meter tracks */
+  --surface-sunken:  #EEF1F5;
+  --canvas-sunken:   #EDF0F5;   /* ground outside the centred shell */
   --hairline:        #E3E8EF;   /* every border. 1px. always. */
   --hairline-strong: #CBD3DE;   /* dividers that need to read as structure */
 
@@ -85,7 +86,14 @@
   --s-7: 3rem;      /* 48 */
 
   --rail-w: 232px;
-  --content-max: 1440px;
+  /* The whole shell is capped and centred, rail included. Capping only the
+     content while the header spans the viewport leaves the header's controls
+     floating a screen away from what they act on: measured on a 3440px
+     display, the action cluster sat ~1770px right of where the content ended.
+     The cap also keeps table rows scannable -- past roughly this width the eye
+     has too far to travel between a row's leading identifier and its trailing
+     values. */
+  --shell-max: 1600px;
 
   /* --- shape ------------------------------------------------------------- */
   --r-control: 6px;
@@ -107,6 +115,15 @@
   --t-slow: 280ms;
 
   /* --- focus ------------------------------------------------------------- */
+  /* Series colours for the job timeline, deliberately separate from the
+     signal palette. Drawing a chart in the ready/failed colours makes an
+     ordinary bar read as an alert; these sit at similar luminance so no phase
+     shouts louder than the next, and they are the only large fills allowed. */
+  --series-queued: #6B7688;
+  --series-provisioning: #7C6FB8;
+  --series-running: #3E8FA6;
+  --series-failed: #A8505F;
+
   --focus-ring: 2px solid var(--accent);
   --focus-offset: 2px;
 }
@@ -114,24 +131,25 @@
 /* --- DARK: OS preference, unless the user explicitly chose light ---------- */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --canvas:          #0D1117;
-    --canvas-alt:      #10161F;
-    --surface:         #161B22;
-    --surface-raised:  #1C222B;
-    --surface-sunken:  #0A0E14;
-    --hairline:        #1F2733;
-    --hairline-strong: #2C3644;
+    --canvas:          #0A0D13;
+    --canvas-alt:      #0F141C;
+    --surface:         #171D27;
+    --surface-raised:  #202834;
+    --surface-sunken:  #0C1017;
+    --canvas-sunken:   #05070B;
+    --hairline:        #2A3341;
+    --hairline-strong: #3B4657;
 
-    --text:            #E6EDF3;
-    --text-dim:        #8B98A9;
-    --text-faint:      #5A6675;
+    --text:            #E8EEF6;
+    --text-dim:        #9AA7B8;
+    --text-faint:      #6E7C8E;
 
-    --accent:          #6EE7F9;
+    --accent:          #5BC8DE;
     --accent-ink:      #04222B;
-    --ok:              #4ADE80;
-    --warn:            #FBBF24;
-    --bad:             #FB7185;
-    --info:            #A78BFA;
+    --ok:              #46C97F;
+    --warn:            #E0A93A;
+    --bad:             #E8677C;
+    --info:            #9B87E8;
 
     /* Dark surfaces need a slightly stronger wash to read at all. */
     --ok-wash:     color-mix(in srgb, var(--ok)     12%, var(--surface));
@@ -149,24 +167,25 @@
 
 /* --- DARK: explicit user choice, wins over the OS ------------------------- */
 :root[data-theme="dark"] {
-  --canvas:          #0D1117;
-  --canvas-alt:      #10161F;
-  --surface:         #161B22;
-  --surface-raised:  #1C222B;
-  --surface-sunken:  #0A0E14;
-  --hairline:        #1F2733;
-  --hairline-strong: #2C3644;
+  --canvas:          #0A0D13;
+  --canvas-alt:      #0F141C;
+  --surface:         #171D27;
+  --surface-raised:  #202834;
+  --surface-sunken:  #0C1017;
+  --canvas-sunken:   #05070B;
+  --hairline:        #2A3341;
+  --hairline-strong: #3B4657;
 
-  --text:            #E6EDF3;
-  --text-dim:        #8B98A9;
-  --text-faint:      #5A6675;
+  --text:            #E8EEF6;
+  --text-dim:        #9AA7B8;
+  --text-faint:      #6E7C8E;
 
-  --accent:          #6EE7F9;
+  --accent:          #5BC8DE;
   --accent-ink:      #04222B;
-  --ok:              #4ADE80;
-  --warn:            #FBBF24;
-  --bad:             #FB7185;
-  --info:            #A78BFA;
+  --ok:              #46C97F;
+  --warn:            #E0A93A;
+  --bad:             #E8677C;
+  --info:            #9B87E8;
 
   --ok-wash:     color-mix(in srgb, var(--ok)     12%, var(--surface));
   --warn-wash:   color-mix(in srgb, var(--warn)   12%, var(--surface));

@@ -41,39 +41,8 @@ Deployment-specific detail — real hostnames, addresses, secret-store paths —
 deliberately lives outside this repository. Operators keep their own notes;
 this section states only what has to be true, not where.
 
-### Provision an admin token, then fail closed
-
-Every `POST`/`PUT` under `/api/v1/admin/` — drain, resume, force-reconcile,
-rewrite repository policy, purge a build cache, destroy a container — accepts
-requests without any credential when `api.admin_token_file` is unset. A reverse
-proxy in front of the dashboard does not help: anything that can reach the
-service port directly bypasses it. The dashboard shows a standing
-`admin_unauthenticated` alert until a token is configured.
-
-To enable it:
-
-1. Generate a token, e.g. `openssl rand -hex 32`, and store it wherever your
-   deployment keeps secrets.
-2. Make it readable by the service as a file. With systemd, the natural fit is
-   a credential:
-
-   ```ini
-   Environment=RUNNER_ORCHESTRATOR_ADMIN_TOKEN_FILE=%d/runner_orchestrator_admin_token
-   LoadCredential=runner_orchestrator_admin_token:/path/to/admin-token
-   ```
-
-   `admin_token_file` in `config.yaml` works equally well; the environment
-   variable simply overrides it, matching how the other secrets are handled.
-3. Once the token is in place, set:
-
-   ```yaml
-   api:
-     allow_unauthenticated_admin: false
-   ```
-
-The permissive default is deliberate: configuration is loaded at import, so
-failing closed before a token exists would stop the service from starting on
-its next restart. Flip it once, after the token is provisioned.
+Securing the admin API is **not** in this list any more: it is done from the
+dashboard on first run, with no host access required.
 
 ### Confirm the storage endpoint on your Proxmox version
 

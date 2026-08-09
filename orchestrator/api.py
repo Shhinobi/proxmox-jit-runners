@@ -6,7 +6,6 @@ from typing import Any
 
 from prometheus_client import REGISTRY
 
-from .auth import admin_auth_status
 from .config import (
     ConfigError,
     Settings,
@@ -495,14 +494,15 @@ def build_alerts(
         )
 
     auth = overview.get("admin_auth") or {}
-    if not auth.get("enabled"):
+    if auth.get("claimed") is False:
         alerts.append(
             {
                 "severity": "warning",
                 "code": "admin_unauthenticated",
                 "message": (
-                    "Admin actions are unauthenticated. Set api.admin_token_file to "
-                    "require a token for drain, policy changes, and container destroy."
+                    "This instance has no admin password, so drain, policy changes and "
+                    "container destroy are open to anything that can reach the port. "
+                    "Set one from the setup panel."
                 ),
             }
         )
@@ -519,7 +519,11 @@ def build_alerts(
     return alerts
 
 
-async def build_overview(orchestrator: Orchestrator, settings: Settings) -> dict[str, Any]:
+async def build_overview(
+    orchestrator: Orchestrator,
+    settings: Settings,
+    admin_auth: dict[str, object] | None = None,
+) -> dict[str, Any]:
     ready, checks = await orchestrator.readiness()
     summary = await orchestrator.db.status_summary()
     active = await orchestrator.db.count_active()
@@ -605,7 +609,7 @@ async def build_overview(orchestrator: Orchestrator, settings: Settings) -> dict
             },
         },
         "pending_deregistrations": pending_deregistrations,
-        "admin_auth": admin_auth_status(settings),
+        "admin_auth": admin_auth,
         "reconcile": {
             "last_success_age_seconds": reconcile_age,
             "interval_seconds": settings.capacity.reconcile_seconds,
@@ -624,13 +628,14 @@ async def build_dashboard_snapshot(
     orchestrator: Orchestrator,
     settings: Settings,
     *,
+    admin_auth: dict[str, object] | None = None,
     job_limit: int = 50,
     delivery_limit: int = 50,
     status: str | None = None,
     repository: str | None = None,
     mode: str | None = None,
 ) -> dict[str, Any]:
-    overview = await build_overview(orchestrator, settings)
+    overview = await build_overview(orchestrator, settings, admin_auth=admin_auth)
     all_instances = await orchestrator.db.list_instances()
     instances = await orchestrator.db.list_instances(repository=repository, mode=mode)
     jobs = await orchestrator.db.list_jobs(

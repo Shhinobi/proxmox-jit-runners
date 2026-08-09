@@ -68,7 +68,7 @@ const STATUS = {
   delete_pending: { cls: "s-pending",      glyph: "▽", label: "delete pending" },
   deleting:       { cls: "s-pending",      glyph: "▽", label: "deleting" },
   delete_failed:  { cls: "s-failed",       glyph: "✕", label: "delete failed" },
-  completed:      { cls: "s-ready",        glyph: "●", label: "completed" },
+  completed:      { cls: "s-done",         glyph: "●", label: "completed" },
   failed:         { cls: "s-failed",       glyph: "✕", label: "failed" },
   queued:         { cls: "s-idle",         glyph: "○", label: "queued" },
   waiting_for_runner: { cls: "s-provisioning", glyph: "◐", label: "waiting" },
@@ -176,6 +176,8 @@ function dashboard() {
     source: null,
     retryDelay: 1000,
 
+    setup: { claimed: true, can_claim: false, claim_window_seconds: 0 },
+    setupForm: { password: "", confirm: "" },
     filters: { repository: "", status: "", mode: "", q: "" },
     logFilters: { level: "all", category: "all" },
     openLog: null,
@@ -210,6 +212,7 @@ function dashboard() {
         else this.connect();
       });
       this.connect();
+      this.refreshSetup();
     },
 
     onRouteEnter() {
@@ -268,6 +271,37 @@ function dashboard() {
       this.applyTheme();
     },
     get themeGlyph() { return { auto: "◐", dark: "☾", light: "☀" }[this.theme]; },
+
+    /* --- first-run setup --- */
+    get needsSetup() {
+      const auth = this.overview.admin_auth ?? this.setup;
+      return auth.claimed === false;
+    },
+    async refreshSetup() {
+      try {
+        this.setup = await apiRequest("/api/v1/setup");
+      } catch {
+        /* Non-fatal: the snapshot carries the same state. */
+      }
+    },
+    async claimInstance() {
+      const password = this.setupForm.password;
+      if (password.length < 12 || password !== this.setupForm.confirm) return;
+      try {
+        const body = await apiRequest("/api/v1/setup/claim", {
+          method: "POST",
+          body: JSON.stringify({ password }),
+        });
+        // Store it for this tab so the very next admin action just works.
+        sessionStorage.setItem(TOKEN_KEY, password);
+        this.setupForm = { password: "", confirm: "" };
+        this.toast("ok", "Instance secured", body.message);
+        await this.refreshSetup();
+        await this.refreshOnce();
+      } catch (error) {
+        this.toast("bad", "Could not set the password", String(error.message || error), 12000);
+      }
+    },
 
     /* --- derived --- */
     get overview() { return this.snap?.overview ?? {}; },

@@ -52,11 +52,24 @@ table { border-collapse: collapse; width: 100%; }
 }
 
 /* ---------------------------------------------------------------- shell --- */
+/* The shell is capped and centred as one unit, rail included. Centring only
+   the content would strand the rail against the far edge of a wide display;
+   moving both keeps the navigation next to the thing it navigates. The side
+   rules give the column a deliberate edge so it reads as an application
+   surface rather than as content floating in a void. */
 .app {
   display: grid;
   grid-template-columns: var(--rail-w) minmax(0, 1fr);
   min-height: 100vh;
+  max-width: var(--shell-max);
+  margin-inline: auto;
+  background: var(--canvas);
+  border-inline: 1px solid var(--hairline);
 }
+
+/* Outside the shell sits a touch darker, so the centred column reads as lifted
+   rather than as a gap someone forgot to fill. */
+body { background: var(--canvas-sunken, var(--surface-sunken)); }
 
 /* ----------------------------------------------------------------- rail --- */
 .rail {
@@ -177,7 +190,6 @@ table { border-collapse: collapse; width: 100%; }
 
 .page {
   padding: var(--s-5);
-  max-width: var(--content-max);
   width: 100%;
   display: flex;
   flex-direction: column;
@@ -241,6 +253,18 @@ table { border-collapse: collapse; width: 100%; }
   font-size: 9px; color: var(--text-faint); white-space: nowrap;
 }
 .meter.is-critical { border-color: color-mix(in srgb, var(--bad) 45%, var(--hairline)); background: var(--bad-wash); }
+
+/* A focused, one-off task: constrained and centred rather than stretched
+   across a width it has no content for. */
+.setup {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--hairline));
+  max-width: 42rem;
+  margin-inline: auto;
+  margin-block-start: var(--s-6);
+}
+.setup .panel__head { background: var(--warn-wash); }
+.setup__form { display: flex; flex-direction: column; gap: var(--s-3); margin-top: var(--s-4); }
+.setup__form .btn { align-self: flex-start; }
 
 /* --------------------------------------------------------------- alerts --- */
 .alerts { display: flex; flex-direction: column; gap: var(--s-2); }
@@ -362,10 +386,24 @@ table { border-collapse: collapse; width: 100%; }
 .status.s-running      { color: var(--accent);border-color: color-mix(in srgb, var(--accent)35%, var(--hairline)); background: var(--accent-wash); }
 .status.s-provisioning { color: var(--info); border-color: color-mix(in srgb, var(--info) 35%, var(--hairline)); background: var(--info-wash); }
 .status.s-idle         { color: var(--text-dim); }
+/* For outcomes that are simply the expected one. A finished job is not an
+   achievement, and colouring fifteen of them in a row spends the attention
+   budget that the one failure needs. Colour marks the exception. */
+.status.s-done         { color: var(--text-dim); border-color: var(--hairline); }
+.status.s-done .status__glyph { color: var(--ok); }
 .status.s-pending      { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, var(--hairline)); background: var(--warn-wash); }
 .status.s-failed       { color: var(--bad);  border-color: color-mix(in srgb, var(--bad)  35%, var(--hairline)); background: var(--bad-wash); }
 
 .dot-list { display: flex; align-items: center; gap: var(--s-2); }
+
+.tag {
+  display: inline-flex; align-items: center; gap: var(--s-1);
+  font-size: var(--fs-micro); color: var(--text-dim); white-space: nowrap;
+}
+.tag__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); }
+.tag__dot.is-warm { background: var(--series-running); }
+.tag__dot.is-pool { background: var(--series-provisioning); }
+.tag__dot.is-cold { background: var(--series-queued); }
 
 /* -------------------------------------------------------------- controls --- */
 .btn {
@@ -484,11 +522,11 @@ table { border-collapse: collapse; width: 100%; }
            background: var(--surface-sunken); }
 .tl-seg { position: relative; transition: filter var(--t-fast) var(--ease); }
 .tl-seg:hover { filter: brightness(1.25); }
-.tl-seg.p-queued       { background: color-mix(in srgb, var(--text-faint) 45%, transparent); }
-.tl-seg.p-provisioning { background: var(--info); }
-.tl-seg.p-registering  { background: color-mix(in srgb, var(--info) 60%, var(--accent)); }
-.tl-seg.p-running      { background: var(--accent); }
-.tl-seg.p-failed       { background: var(--bad); }
+.tl-seg.p-queued       { background: var(--series-queued); }
+.tl-seg.p-provisioning { background: var(--series-provisioning); }
+.tl-seg.p-registering  { background: color-mix(in srgb, var(--series-provisioning) 60%, var(--series-running)); }
+.tl-seg.p-running      { background: var(--series-running); }
+.tl-seg.p-failed       { background: var(--series-failed); }
 .tl-dur { font-size: var(--fs-small); color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .tl-legend { display: flex; flex-wrap: wrap; gap: var(--s-4); font-size: var(--fs-small); color: var(--text-dim); }
 
