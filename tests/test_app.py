@@ -522,6 +522,41 @@ def test_access_control_is_not_presented_as_dependency_health() -> None:
     assert "Admin access" not in html
 
 
+def test_the_confirm_dialog_never_builds_html_from_data() -> None:
+    """The change list renders repository names, which come from the API and
+    from a free-text field. `x-html` anywhere in this dialog would turn a
+    repository called `<img onerror=...>` into script execution."""
+    html = (ui_directory_for_test() / "index.html").read_text(encoding="utf-8")
+    dialog = html.split('<template x-if="confirmBox">')[1].split("</template>\n\n  <!-- ═")[0]
+
+    assert "x-html" not in dialog
+    assert "innerHTML" not in dialog
+    # Each dynamic value is bound individually rather than concatenated.
+    for binding in ("field.label", "field.from", "field.to", "entry.name", "group.group"):
+        assert f'x-text="{binding}"' in dialog, f"{binding} is not bound with x-text"
+
+
+def test_saving_policies_confirms_the_diff_not_the_whole_config() -> None:
+    """The dialog used to restate the entire configuration in one concatenated
+    paragraph -- which the operator had just typed, and which the modal then
+    collapsed into a wall because nothing preserved the newlines."""
+    js = (ui_directory_for_test() / "js" / "app.js").read_text(encoding="utf-8")
+
+    assert "diffPolicies(this.baseline" in js, "save() must confirm against the loaded baseline"
+    assert "this.baseline = this.toPayload()" in js, "hydrate() must record the baseline"
+    # The old builder, by fragments unique to it. `installation(s)` is
+    # deliberately NOT one of them: the load toast says that too, legitimately.
+    for fragment in ("repository(ies)", "warm=${", "idle→", "max_concurrent=${"):
+        assert fragment not in js, f"the concatenated summary survives: {fragment}"
+    assert "\\n\\n" not in js, "a confirm body must not carry layout as newlines"
+
+
+def test_the_confirm_dialog_shows_its_kicker() -> None:
+    """Every call site passes `kicker`; the template dropped it on the floor."""
+    html = (ui_directory_for_test() / "index.html").read_text(encoding="utf-8")
+    assert 'x-text="confirmBox.kicker"' in html
+
+
 def test_webfonts_are_vendored_and_resolve() -> None:
     """The no-external-request rule is the whole reason the fonts are in the
     repo: a CDN reference works on the developer's laptop and renders nothing on

@@ -112,6 +112,110 @@ function confirmAction(opts) {
 /* Shared re-entrancy guard between the dashboard and the policies store. */
 const state = { actionInFlight: false };
 
+/* ------------------------------------------------------ policy diffing ---- */
+/* A confirm dialog exists to answer one question: what is about to change?
+   Restating the whole configuration does not answer it -- the operator just
+   typed that configuration and can see it on the page behind the dialog. So
+   the payload about to be sent is compared against the one that was loaded,
+   and only the differences are shown. */
+
+const POLICY_FIELDS = {
+  capacity: {
+    max_active: "max active runners",
+    pool_size: "shared pool size",
+  },
+  installations: {
+    account: "account",
+    installation_id: "installation id",
+    scope: "scope",
+    runner_group_id: "runner group",
+  },
+  repositories: {
+    github_installation: "installation",
+    default_mode: "default mode",
+    warm_capacity: "warm runners",
+    max_concurrent: "max concurrent",
+    warm_idle_capacity: "idle warm runners",
+    warm_idle_after_seconds: "idle after",
+    profile: "profile",
+    allowed_modes: "allowed modes",
+    allowed_events: "allowed events",
+    required_labels: "required labels",
+  },
+};
+
+/* Values are rendered for a human, not echoed as JSON: -1 is a sentinel for
+   "disabled", seconds are the storage unit but minutes are the one the form
+   uses, and an empty list is a meaningful state rather than blank space. */
+function policyValue(field, value) {
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "none";
+  // Before the unit maths, or an absent field formats as "NaN min".
+  if (value === "" || value === null || value === undefined) return "—";
+  if (field === "warm_idle_capacity" && Number(value) < 0) return "off";
+  if (field === "warm_idle_after_seconds") return `${Math.round(Number(value) / 60)} min`;
+  return String(value);
+}
+
+function sameValue(a, b) {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    const x = Array.isArray(a) ? a : [];
+    const y = Array.isArray(b) ? b : [];
+    return x.length === y.length && x.every((v, i) => v === y[i]);
+  }
+  return a === b;
+}
+
+function changedFields(section, before, after) {
+  const labels = POLICY_FIELDS[section] || {};
+  return Object.keys(labels)
+    .filter((field) => !sameValue(before?.[field], after?.[field]))
+    .map((field) => ({
+      label: labels[field],
+      from: policyValue(field, before?.[field]),
+      to: policyValue(field, after?.[field]),
+    }));
+}
+
+/* Returns [] when nothing changed, which the caller treats as its own case
+   rather than rendering an empty dialog. */
+function diffPolicies(before, after) {
+  const groups = [];
+
+  const capacity = changedFields("capacity", before?.capacity, after?.capacity);
+  if (capacity.length) {
+    groups.push({ group: "Capacity", entries: [{ name: "", state: "changed", fields: capacity }] });
+  }
+
+  for (const section of ["installations", "repositories"]) {
+    const from = before?.[section] || {};
+    const to = after?.[section] || {};
+    const entries = [];
+    // Union of both sides, so a removal is as visible as an addition.
+    for (const name of [...new Set([...Object.keys(from), ...Object.keys(to)])].sort()) {
+      if (!(name in from)) {
+        // A new entry has no previous value, and rendering "— → 1" for every
+        // field is noise dressed up as information. `from: null` tells the
+        // template to draw the value alone.
+        entries.push({
+          name,
+          state: "added",
+          fields: changedFields(section, {}, to[name]).map((f) => ({ ...f, from: null })),
+        });
+      } else if (!(name in to)) {
+        entries.push({ name, state: "removed", fields: [] });
+      } else {
+        const fields = changedFields(section, from[name], to[name]);
+        if (fields.length) entries.push({ name, state: "changed", fields });
+      }
+    }
+    if (entries.length) {
+      groups.push({ group: section === "installations" ? "Installations" : "Repositories", entries });
+    }
+  }
+
+  return groups;
+}
+
 /* --------------------------------------------------------- svg helpers ---- */
 
 /* A gap in the data is drawn as a gap. Interpolating across an outage would
@@ -842,6 +946,10 @@ document.addEventListener("alpine:init", () => {
       hydrated: false,
       dirty: false,
       saving: false,
+      /* The last payload known to match the server, set by hydrate(). Null
+         until then, which makes a save before any load read as all-new
+         rather than as no-change. */
+      baseline: null,
       statusKind: "muted",
       statusText: "",
 
@@ -949,6 +1057,11 @@ document.addEventListener("alpine:init", () => {
         };
         this.hydrated = true;
         this.dirty = false;
+        /* The baseline is taken through toPayload() rather than from the raw
+           API body so both sides of the diff are normalised the same way --
+           otherwise trimming a stray space or an int-vs-string would surface
+           as a change the operator never made. */
+        this.baseline = this.toPayload();
         this.setStatus("muted", "");
       },
 
@@ -1069,33 +1182,20 @@ document.addEventListener("alpine:init", () => {
           );
           return;
         }
-        const instNames = Object.keys(installations);
-        const names = Object.keys(repositories);
-        const warmLines = names
-          .map((n) => {
-            const repo = repositories[n];
-            const bits = [
-              `warm=${repo.warm_capacity ?? 0}`,
-              `profile=${repo.profile || "crossbuild-small"}`,
-            ];
-            if (Number(repo.max_concurrent || 0) > 0) bits.push(`max_concurrent=${repo.max_concurrent}`);
-            if (Number(repo.warm_idle_capacity ?? -1) >= 0) {
-              bits.push(
-                `idle→${repo.warm_idle_capacity} after ${Math.round((repo.warm_idle_after_seconds || 0) / 60)}min`
-              );
-            }
-            return `· ${n} ${bits.join(" ")}`;
-          })
-          .join("\n");
+        const changes = diffPolicies(this.baseline, { capacity, installations, repositories });
         const ok = await confirmAction({
           kind: "ok",
           kicker: "Policies",
-          title: "Save and apply policies?",
-          body: `Capacity: max_active=${capacity.max_active}, pool_size=${capacity.pool_size} (warm target=${warmTarget})\n\n${instNames.length} installation(s):\n${instNames
-            .map((n) => `· ${n} → ${installations[n].account} (id ${installations[n].installation_id})`)
-            .join("\n")}\n\n${names.length} repository(ies):\n${warmLines}\n\nWrites the override file and syncs the broker.`,
-          confirmLabel: "Save and apply",
-          cancelLabel: "Cancel",
+          title: changes.length ? "Apply these changes?" : "Nothing has changed",
+          /* With a change list the body is a footnote, not the content. With
+             no changes it carries the whole message, because saving anyway is
+             still legitimate -- it rewrites the override file on disk. */
+          body: changes.length
+            ? "Writes the override file and syncs the broker."
+            : "Your draft matches what is already running. Saving rewrites the override file and re-syncs the broker without changing behaviour.",
+          changes,
+          confirmLabel: changes.length ? "Apply" : "Save anyway",
+          cancelLabel: changes.length ? "Cancel" : "Keep editing",
         });
         if (!ok) {
           showToast("info", "Save cancelled", "Nothing was written.", 4000);

@@ -1224,12 +1224,46 @@
   <template x-if="confirmBox">
     <div class="modal">
       <div class="scrim" @click="resolveConfirm(false)"></div>
-      <div class="modal__card" :class="{ 'is-danger': confirmBox.kind === 'danger' }"
+      <div class="modal__card"
+           :class="{ 'is-danger': confirmBox.kind === 'danger',
+                     'has-diff': confirmBox.changes && confirmBox.changes.length }"
            role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
         <header class="modal__head">
+          <p class="modal__kicker" x-show="confirmBox.kicker" x-text="confirmBox.kicker"></p>
           <h2 class="panel__title" id="confirm-title" x-text="confirmBox.title"></h2>
         </header>
-        <div class="modal__body" x-text="confirmBox.body"></div>
+        <div class="modal__body">
+          <!-- Every dynamic value goes through x-text. Repository names come
+               from the API and from the form, so no part of this may be built
+               as an HTML string. -->
+          <template x-if="confirmBox.changes && confirmBox.changes.length">
+            <div class="diff">
+              <template x-for="group in confirmBox.changes" :key="group.group">
+                <section class="diff__group">
+                  <h3 class="diff__title" x-text="group.group"></h3>
+                  <template x-for="entry in group.entries" :key="entry.name || group.group">
+                    <div class="diff__entry">
+                      <p class="diff__name" x-show="entry.name">
+                        <span class="diff__state" :class="'is-' + entry.state"
+                              x-text="entry.state"></span>
+                        <span class="mono" x-text="entry.name"></span>
+                      </p>
+                      <template x-for="field in entry.fields" :key="field.label">
+                        <p class="diff__field">
+                          <span class="diff__label" x-text="field.label"></span>
+                          <span class="diff__from" x-show="field.from" x-text="field.from"></span>
+                          <span class="diff__arrow" x-show="field.from" aria-hidden="true">→</span>
+                          <span class="diff__to" x-text="field.to"></span>
+                        </p>
+                      </template>
+                    </div>
+                  </template>
+                </section>
+              </template>
+            </div>
+          </template>
+          <p class="modal__note" x-text="confirmBox.body"></p>
+        </div>
         <footer class="modal__foot">
           <button class="btn" @click="resolveConfirm(false)"
                   x-text="confirmBox.cancelLabel || 'Cancel'"></button>

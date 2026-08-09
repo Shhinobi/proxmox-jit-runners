@@ -651,7 +651,55 @@ body { background: var(--canvas-sunken, var(--surface-sunken)); }
 }
 @keyframes rise { from { transform: translateY(8px); opacity: 0; } }
 .modal__head { padding: var(--s-4); border-bottom: 1px solid var(--hairline); }
+.modal__kicker {
+  font-size: var(--fs-micro); letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase; color: var(--text-faint); margin-bottom: var(--s-1);
+}
 .modal__body { padding: var(--s-4); font-size: var(--fs-body); color: var(--text-dim); }
+/* A change list has no natural length, so it scrolls inside the card rather
+   than growing the card past the viewport and stranding the buttons. */
+.modal__card.has-diff { width: min(560px, 100%); }
+/* The LIST scrolls, not the body: scrolling the body took the footnote with it
+   and left it sliced in half at the boundary. */
+.modal__card.has-diff .diff { max-height: min(46vh, 360px); overflow-y: auto; }
+.modal__note { color: var(--text-faint); font-size: var(--fs-small); }
+.diff + .modal__note {
+  margin-top: var(--s-4); padding-top: var(--s-3);
+  border-top: 1px solid var(--hairline);
+}
+
+/* ---------------------------------------------------------------- diff ---- */
+.diff__group + .diff__group { margin-top: var(--s-4); }
+.diff__title {
+  font-size: var(--fs-micro); letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase; color: var(--text-faint);
+  padding-bottom: var(--s-1); border-bottom: 1px solid var(--hairline);
+}
+.diff__entry { padding: var(--s-2) 0; }
+.diff__entry + .diff__entry { border-top: 1px solid var(--hairline); }
+.diff__name { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-small); }
+.diff__name .mono { color: var(--text); }
+/* The verb, not a colour, says what happened to the row. */
+.diff__state {
+  flex: none; font-size: var(--fs-micro); letter-spacing: 0.03em;
+  padding: 1px 6px; border-radius: var(--r-pill);
+  border: 1px solid var(--hairline-strong); color: var(--text-dim);
+}
+.diff__state.is-added   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.diff__state.is-removed { color: var(--bad);  border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+.diff__state.is-changed { color: var(--info); border-color: color-mix(in srgb, var(--info) 45%, transparent); }
+.diff__field {
+  display: grid; grid-template-columns: 1fr auto auto auto;
+  align-items: baseline; gap: var(--s-2);
+  padding: 2px 0 2px var(--s-3); font-size: var(--fs-small);
+}
+.diff__label { color: var(--text-dim); }
+.diff__from {
+  color: var(--text-faint); font-variant-numeric: tabular-nums;
+  text-decoration: line-through; text-decoration-color: var(--text-faint);
+}
+.diff__arrow { color: var(--text-faint); }
+.diff__to { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
 .modal__foot { padding: var(--s-3) var(--s-4); border-top: 1px solid var(--hairline);
                display: flex; justify-content: flex-end; gap: var(--s-2); }
 .modal__card.is-danger { border-top: 3px solid var(--bad); }
