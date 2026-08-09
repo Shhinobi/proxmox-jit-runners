@@ -18,9 +18,22 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-log "Pulling latest code (main)"
+log "Fetching latest code (main)"
 git config --global --add safe.directory "$APP_DIR" || true
-git -C "$APP_DIR" pull --ff-only
+git -C "$APP_DIR" fetch origin main --tags --prune
+
+# A fast-forward is the normal case. It stops being possible if upstream history
+# was rewritten (e.g. to purge something that should never have been committed),
+# and a deploy target is a pure checkout with nothing local worth keeping — so
+# match the remote exactly rather than failing and requiring a manual re-clone.
+if git -C "$APP_DIR" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+  log "Fast-forwarding to origin/main"
+  git -C "$APP_DIR" merge --ff-only origin/main
+else
+  log "History diverged from origin/main; resetting this checkout to match"
+  git -C "$APP_DIR" reset --hard origin/main
+  git -C "$APP_DIR" clean -fd
+fi
 
 log "Syncing dependencies (uv sync --no-dev)"
 cd "$APP_DIR"
