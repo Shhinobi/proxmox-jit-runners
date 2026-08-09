@@ -1851,3 +1851,38 @@ async def test_unexpected_storage_response_shape_is_loud(
         if e["level"] == "error" and e["category"] == "storage"
     ]
     assert errors, "a shape mismatch must be reported, not swallowed"
+
+
+# --- Allocation must agree with the configured gateway ------------------------
+
+
+def test_subnet_prefix_is_derived_from_the_gateway() -> None:
+    from orchestrator.service import _subnet_prefix
+
+    assert _subnet_prefix("10.20.60.1") == "10.20.60."
+    assert _subnet_prefix("192.168.5.254") == "192.168.5."
+    with pytest.raises(ValueError):
+        _subnet_prefix("not-an-ip")
+
+
+async def test_allocated_address_shares_the_gateway_subnet(
+    db: Database, fake_github: FakeGitHub, fake_proxmox: FakeProxmox, fake_broker: FakeBroker
+) -> None:
+    """A container whose address does not match its gateway has no route out.
+
+    The prefix used to be a literal in the code while `proxmox.gateway` came
+    from config, so the two could silently disagree — which is exactly what
+    happened when the literal was edited.
+    """
+    base = make_settings()
+    for gateway, expected in (("10.20.60.1", "10.20.60.100"), ("172.16.9.1", "172.16.9.100")):
+        settings = replace(base, proxmox=replace(base.proxmox, gateway=gateway))
+        orch = Orchestrator(
+            settings, db, cast(Any, fake_github), cast(Any, fake_proxmox), cast(Any, fake_broker)
+        )
+        try:
+            _vmid, ip_address = await orch._allocate()
+            assert ip_address == expected
+            assert ip_address.rsplit(".", 1)[0] == gateway.rsplit(".", 1)[0]
+        finally:
+            await orch.stop(drain_seconds=0.1)

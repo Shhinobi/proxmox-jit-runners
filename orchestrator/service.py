@@ -93,6 +93,20 @@ class ReconcileContext:
         return (time.monotonic() - self.started) >= self.budget_seconds
 
 
+def _subnet_prefix(gateway: str) -> str:
+    """First three octets of the runner subnet, taken from the gateway.
+
+    This used to be a hardcoded literal while `proxmox.gateway` was
+    configurable, so the two could disagree and a container would come up with
+    an address that had no route to its own gateway. Deriving one from the
+    other makes that impossible to misconfigure.
+    """
+    octets = gateway.split(".")
+    if len(octets) != 4 or not all(o.isdigit() for o in octets):
+        raise ValueError(f"proxmox.gateway is not an IPv4 address: {gateway!r}")
+    return ".".join(octets[:3]) + "."
+
+
 def _parse_avail_mib(broker_output: str) -> int | None:
     """Pull `avail_mib=N` out of the broker's clean-work reply."""
     match = re.search(r"avail_mib=(\d+)", broker_output or "")
@@ -764,7 +778,7 @@ class Orchestrator:
             ip_octet = pve.ip_start + (vmid - pve.vmid_start)
             if ip_octet > pve.ip_end:
                 break
-            return vmid, f"10.0.0.{ip_octet}"
+            return vmid, f"{_subnet_prefix(pve.gateway)}{ip_octet}"
         raise RuntimeError("runner VMID/IP range exhausted")
 
     async def _reserve_instance(
