@@ -940,7 +940,7 @@ async def test_pool_replenishment_respects_already_saturated_active_budget(
     # Occupy the single max_active slot with a running ephemeral instance first.
     await db.create_instance(5000, "10.0.0.100", "ephemeral", "running", "OldOwner/example-app", 1)
 
-    await pool_capacity_orchestrator._replenish_pool()
+    await pool_capacity_orchestrator._replenish_pool(blocking=True)
 
     instances = await db.list_instances()
     assert len(instances) == 1
@@ -1119,7 +1119,7 @@ async def test_pool_creation_always_uses_default_profile(
     profile_orchestrator: tuple[Orchestrator, RunnerProfile], fake_proxmox: FakeProxmox
 ) -> None:
     orch, _large_profile = profile_orchestrator
-    await orch._replenish_pool()
+    await orch._replenish_pool(blocking=True)
 
     assert fake_proxmox.clone_calls
     default_profile = orch.settings.profiles["crossbuild-small"]
@@ -1515,7 +1515,7 @@ async def test_replenish_is_refused_below_the_storage_floor(
     """
     fake_proxmox.storage = _storage(350, 319)
 
-    await storage_orchestrator._replenish_pool()
+    await storage_orchestrator._replenish_pool(blocking=True)
 
     assert fake_proxmox.clones == []
 
@@ -1525,7 +1525,7 @@ async def test_replenish_is_allowed_with_headroom(
 ) -> None:
     fake_proxmox.storage = _storage(350, 120)
 
-    await storage_orchestrator._replenish_pool()
+    await storage_orchestrator._replenish_pool(blocking=True)
 
     assert len(fake_proxmox.clones) == 2
 
@@ -1536,7 +1536,7 @@ async def test_storage_reading_is_cached_across_clones(
     """Gating every clone must not mean querying on every clone."""
     fake_proxmox.storage = _storage(350, 120)
 
-    await storage_orchestrator._replenish_pool()
+    await storage_orchestrator._replenish_pool(blocking=True)
 
     assert len(fake_proxmox.clones) == 2
     assert fake_proxmox.calls["storage_status"] == 1
@@ -1886,3 +1886,30 @@ async def test_allocated_address_shares_the_gateway_subnet(
             assert ip_address.rsplit(".", 1)[0] == gateway.rsplit(".", 1)[0]
         finally:
             await orch.stop(drain_seconds=0.1)
+
+
+async def test_pool_cloning_does_not_block_the_reconcile_pass(
+    storage_orchestrator: Orchestrator, fake_proxmox: FakeProxmox
+) -> None:
+    """A pass must reach `_finish_pass`, or liveness reporting never advances.
+
+    `proxmox.clone` holds a process-wide lock for about a minute per container.
+    Replenishing the pool inline kept a pass running for minutes, so the "last
+    clean pass" gauge stayed at zero and the stalled-reconcile alert would fire
+    continuously against a system that was healthy and simply busy.
+    """
+    from orchestrator.service import RECONCILE_DURATION
+
+    fake_proxmox.storage = _storage(350, 120)
+    fake_proxmox.slow("clone", 0.3)
+    before = RECONCILE_DURATION._sum.get()
+
+    started = time.monotonic()
+    await storage_orchestrator.reconcile()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.25, "the pass returned without waiting on clones"
+    assert RECONCILE_DURATION._sum.get() > before, "the pass completed and was recorded"
+
+    await asyncio.gather(*storage_orchestrator._background_tasks, return_exceptions=True)
+    assert fake_proxmox.clones, "the scheduled cloning still runs"

@@ -2311,9 +2311,25 @@ class Orchestrator:
             )
             LOGGER.exception("warm runner health check failed", extra={"vmid": instance["vmid"]})
 
-    async def _replenish_pool(self) -> None:
+    async def _replenish_pool(self, *, blocking: bool = False) -> None:
+        """Top the global pool up.
+
+        Cloning is scheduled rather than awaited, for the same reason warm
+        creation is: `proxmox.clone` holds a process-wide lock and takes about a
+        minute per container, so replenishing a pool of three inline kept a
+        reconcile pass running for minutes. No pass ever reached `_finish_pass`,
+        which meant the "last clean pass" gauge never advanced and the stalled-
+        reconcile alert would have fired continuously while the system was in
+        fact healthy and busy building.
+        """
         if await self._refuse_replenish_on_storage("pool_replenish"):
             return
+        if blocking:
+            await self._replenish_pool_inner()
+            return
+        self._spawn_background(self._replenish_pool_inner(), "global-pool-replenishment")
+
+    async def _replenish_pool_inner(self) -> None:
         async with self._pool_lock:
             missing = self.settings.capacity.pool_size - await self.db.count_ready_pool()
             for _ in range(max(0, missing)):
