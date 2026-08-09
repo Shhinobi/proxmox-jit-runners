@@ -1,5 +1,5 @@
 /* ============================================================================
-   Runner Orchestrator dashboard — Luminous Slate.
+   Orchestra — the Proxmox Runner Orchestrator dashboard. Luminous Slate.
 
    Replaces ~1300 lines of hand-rolled innerHTML string building with Alpine
    components over one SSE snapshot. Structure mirrors rework-task/ so the

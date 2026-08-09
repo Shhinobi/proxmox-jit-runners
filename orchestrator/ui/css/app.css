@@ -92,23 +92,21 @@ body { background: var(--canvas-sunken, var(--surface-sunken)); }
   padding: var(--s-2);
 }
 .brand__mark { flex: none; display: block; }
-/* The mark pulses only while the stream is reconnecting — it is the single
-   liveness cue, so it must never animate during normal operation. */
+/* The three voices under the phrase are the liveness cue: they keep time only
+   while the stream does. They pulse ONLY while reconnecting, so movement in the
+   corner of the eye always means something. */
 .brand__mark .glyph { transition: opacity var(--t-base) var(--ease); }
 .is-reconnecting .brand__mark .glyph { animation: pulse 1.4s var(--ease) infinite; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.brand:hover .brand__mark .glyph { opacity: 0.8; }
 
 .brand__word {
   font-size: 1.0625rem;
   font-weight: 600;
-  letter-spacing: 0.01em;
+  letter-spacing: -0.01em;
   line-height: 1.1;
   color: var(--text);
 }
-/* The bars are the product's own timeline. They pulse only while the stream is
-   reconnecting, so movement in the corner of the eye always means something. */
-.brand__mark rect + rect { transition: opacity var(--t-base) var(--ease); }
-.brand:hover .brand__mark rect + rect { opacity: 0.85; }
 .brand__sub {
   font-size: var(--fs-micro);
   color: var(--text-faint);
@@ -701,6 +699,17 @@ body { background: var(--canvas-sunken, var(--surface-sunken)); }
   animation: sweep 1.3s var(--ease) infinite;
 }
 @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+/* --------------------------------------------------------- reduced motion --- */
+/* tokens.css collapses every `var(--t-*)` transition to 1ms, which covers the
+   one-shot animations. It cannot reach these three: they are INFINITE and
+   their durations are literals, so they would keep moving forever for someone
+   who has asked the OS for stillness. Each keeps its meaning without motion. */
+@media (prefers-reduced-motion: reduce) {
+  .is-reconnecting .brand__mark .glyph { animation: none; opacity: 0.45; }
+  .btn.is-busy::after { animation: none; border-top-color: currentColor; opacity: 0.6; }
+  .skel::after { animation: none; }
+}
 
 /* -------------------------------------------------------------- responsive */
 @media (max-width: 1080px) {

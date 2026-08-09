@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -519,6 +520,49 @@ def test_access_control_is_not_presented_as_dependency_health() -> None:
     only because it was convenient to put it there."""
     html = (ui_directory_for_test() / "index.html").read_text(encoding="utf-8")
     assert "Admin access" not in html
+
+
+def test_the_product_is_named_consistently() -> None:
+    """The name is `Orchestra`, capitalised, and the subtitle spells out what it
+    orchestrates. Lowercase `orchestra` read as a stray word rather than a name."""
+    html = (ui_directory_for_test() / "index.html").read_text(encoding="utf-8")
+
+    assert ">Orchestra<" in html
+    assert ">Proxmox Runner Orchestrator<" in html
+    assert ">orchestra<" not in html
+    assert "<title>Orchestra — Proxmox Runner Orchestrator</title>" in html
+
+
+def test_the_mark_is_a_drawn_gesture_not_a_box_of_bars() -> None:
+    """The previous mark was three rounded bars inside a rounded square, which
+    is the house style of every dashboard ever shipped. The identity is a brush
+    stroke: filled paths, no container, no stroke, no rectangles."""
+    html = (ui_directory_for_test() / "index.html").read_text(encoding="utf-8")
+    mark = html.split('class="brand__mark"')[1].split("</svg>")[0]
+
+    assert "<rect" not in mark, "the mark is drawn, not assembled from rectangles"
+    assert "<path" in mark and mark.count("<circle") == 3
+    # The favicon is the same drawing, so the two can never drift apart.
+    assert "M5,72 C20,34 56,12 96,32 C62,26 27,54 5,72 Z" in mark
+    assert "M5,72 C20,34 56,12 96,32 C62,26 27,54 5,72 Z" in html.split('rel="icon"')[1]
+
+
+def test_infinite_animations_are_stopped_under_reduced_motion() -> None:
+    """tokens.css collapses `var(--t-*)` durations, which silently misses any
+    animation whose duration is a literal. The three infinite ones were exactly
+    that, so they kept moving for people who asked the OS for stillness."""
+    css = (ui_directory_for_test() / "css" / "app.css").read_text(encoding="utf-8")
+    body, guard = css.split("@media (prefers-reduced-motion: reduce)")
+
+    # Every perpetual animation outside the guard needs a counterpart inside it.
+    # Counting rather than naming is what makes this catch the NEXT one added.
+    perpetual = re.findall(r"animation:\s*[^;]*\binfinite\b", body)
+    assert len(perpetual) == guard.count("animation: none"), (
+        f"{len(perpetual)} infinite animations, "
+        f"{guard.count('animation: none')} disabled under reduced motion"
+    )
+    for selector in (".brand__mark .glyph", ".btn.is-busy::after", ".skel::after"):
+        assert selector in guard, f"{selector} keeps animating under reduced motion"
 
 
 def ui_directory_for_test():
