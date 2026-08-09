@@ -99,11 +99,16 @@ body { background: var(--canvas-sunken, var(--surface-sunken)); }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
 
 .brand__word {
-  font-size: var(--fs-lead);
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
   line-height: 1.1;
+  color: var(--text);
 }
+/* The bars are the product's own timeline. They pulse only while the stream is
+   reconnecting, so movement in the corner of the eye always means something. */
+.brand__mark rect + rect { transition: opacity var(--t-base) var(--ease); }
+.brand:hover .brand__mark rect + rect { opacity: 0.85; }
 .brand__sub {
   font-size: var(--fs-micro);
   color: var(--text-faint);

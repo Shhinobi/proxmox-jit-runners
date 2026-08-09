@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Runner Orchestrator</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='6' y='6' width='20' height='20' rx='4' transform='rotate(45 16 16)' fill='%236EE7F9'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%23171D27'/><rect x='7' y='9' width='18' height='3.6' rx='1.8' fill='%235BC8DE'/><rect x='7' y='14.2' width='12' height='3.6' rx='1.8' fill='%235BC8DE' opacity='.62'/><rect x='7' y='19.4' width='15' height='3.6' rx='1.8' fill='%235BC8DE' opacity='.34'/></svg>">
 <link rel="stylesheet" href="css/tokens.css">
 <link rel="stylesheet" href="css/app.css">
 <script>
@@ -23,11 +23,14 @@
   <!-- ══════════════════════════════════════════════════════════════ rail ══ -->
   <aside class="rail">
     <a class="brand" href="#/overview" aria-label="Runner Orchestrator, overview">
-      <svg class="brand__mark" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true">
-        <rect class="glyph" x="7" y="7" width="18" height="18" rx="4"
-              transform="rotate(45 16 16)" fill="var(--accent)"/>
-        <rect x="12.5" y="12.5" width="7" height="7" rx="1.5"
-              transform="rotate(45 16 16)" fill="var(--canvas-alt)"/>
+      <svg class="brand__mark" width="30" height="30" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1" y="1" width="30" height="30" rx="9"
+              fill="var(--surface-raised)" stroke="var(--hairline-strong)" stroke-width="1.5"/>
+        <rect class="glyph" x="7" y="9"  width="18" height="3.6" rx="1.8" fill="var(--accent)"/>
+        <rect x="7" y="14.2" width="12" height="3.6" rx="1.8"
+              fill="var(--accent)" opacity="0.62"/>
+        <rect x="7" y="19.4" width="15" height="3.6" rx="1.8"
+              fill="var(--accent)" opacity="0.34"/>
       </svg>
       <span class="brand__text">
         <span class="brand__word">orchestra</span><br>
@@ -120,6 +123,24 @@
         <button class="btn btn--ghost" @click="openPalette()">
           <span>Search</span><span class="kbd">⌘K</span>
         </button>
+        <template x-if="overview.admin_auth?.claimed">
+          <button class="btn btn--ghost" @click="hasToken ? openPasswordChange() : openSignIn()"
+                  :title="hasToken
+                    ? (rememberMe ? 'Signed in — saved on this device' : 'Signed in — this tab only')
+                    : 'Sign in to use admin actions'">
+            <!-- SVG, not an emoji: the emoji lock renders as tofu in several
+                 of the font stacks this dashboard runs under. -->
+            <svg width="12" height="14" viewBox="0 0 12 14" aria-hidden="true"
+                 fill="none" stroke="currentColor" stroke-width="1.4">
+              <rect x="1.2" y="6" width="9.6" height="7" rx="1.6"/>
+              <path :d="hasToken ? 'M3.6 6V3.8a2.4 2.4 0 0 1 4.6-.9' : 'M3.6 6V3.8a2.4 2.4 0 0 1 4.8 0V6'"/>
+            </svg>
+            <span x-text="hasToken ? 'Signed in' : 'Sign in'"></span>
+          </button>
+        </template>
+        <template x-if="hasToken">
+          <button class="btn btn--ghost" @click="signOut()" title="Sign out">Sign out</button>
+        </template>
         <button class="btn btn--ghost" @click="cycleTheme()"
                 :aria-label="'Theme: ' + theme" :title="'Theme: ' + theme">
           <span x-text="themeGlyph" aria-hidden="true"></span>
@@ -748,17 +769,44 @@
         <section class="panel">
           <header class="panel__head">
             <h2 class="panel__title">Admin access</h2>
+            <span class="panel__meta">
+              <span class="status"
+                    :class="overview.admin_auth?.claimed ? 's-ready' : 's-failed'">
+                <span class="status__glyph" aria-hidden="true"
+                      x-text="overview.admin_auth?.claimed ? '●' : '✕'"></span>
+                <span x-text="overview.admin_auth?.claimed ? 'protected' : 'unprotected'"></span>
+              </span>
+            </span>
           </header>
           <div class="panel__body">
             <dl class="kv">
-              <dt>Token required</dt>
-              <dd x-text="overview.admin_auth?.enabled ? 'yes' : 'NO — admin routes are open'"></dd>
-              <dt>This tab</dt>
-              <dd x-text="hasToken ? 'token stored for this session' : 'no token stored'"></dd>
+              <dt>This instance</dt>
+              <dd x-text="overview.admin_auth?.claimed
+                    ? 'Admin actions require the password.'
+                    : 'No password set — anything that reaches this port can change things.'"></dd>
+              <dt>This browser</dt>
+              <dd x-text="!hasToken
+                    ? 'Not signed in. Admin actions will ask for the password.'
+                    : rememberMe
+                      ? 'Signed in, saved on this device until you sign out.'
+                      : 'Signed in for this tab only. Closing it signs you out.'"></dd>
             </dl>
-            <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2)">
-              <button class="btn" @click="promptForToken()">Set token</button>
-              <button class="btn btn--ghost" @click="signOut()">Clear token</button>
+            <p class="meter__note" style="margin-top:var(--s-3);max-width:60ch">
+              Signing in just keeps the password in this browser so drain, policy
+              changes and container destroy stop asking for it each time. It is
+              never sent anywhere except to this orchestrator, and the server
+              stores only a hash of it.
+            </p>
+            <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2);flex-wrap:wrap">
+              <template x-if="!hasToken">
+                <button class="btn btn--primary" @click="openSignIn()">Sign in</button>
+              </template>
+              <template x-if="hasToken">
+                <button class="btn" @click="openPasswordChange()">Change password</button>
+              </template>
+              <template x-if="hasToken">
+                <button class="btn btn--ghost" @click="signOut()">Sign out</button>
+              </template>
             </div>
           </div>
         </section>
@@ -1205,6 +1253,93 @@
                   x-text="confirmBox.label || confirmBox.confirmLabel || 'Confirm'"
                   x-init="$nextTick(() => $el.focus())"></button>
         </footer>
+      </div>
+    </div>
+  </template>
+
+  <!-- ═══════════════════════════════════════════════════════════ sign in ══ -->
+  <template x-if="auth.open">
+    <div class="modal">
+      <div class="scrim" @click="auth.open = false"></div>
+      <div class="modal__card" role="dialog" aria-modal="true" aria-labelledby="signin-title">
+        <header class="modal__head">
+          <h2 class="panel__title" id="signin-title">Sign in</h2>
+        </header>
+        <form class="modal__body" @submit.prevent="submitSignIn()">
+          <p class="meter__note" style="margin-bottom:var(--s-3)">
+            The admin password for this orchestrator. It stays in your browser so
+            admin actions stop asking each time.
+          </p>
+          <div class="field">
+            <label class="field__label" for="signin-password">Admin password</label>
+            <input id="signin-password" class="input" type="password"
+                   autocomplete="current-password" x-model="auth.password">
+          </div>
+          <label class="check" style="margin-top:var(--s-3)">
+            <input type="checkbox" x-model="auth.remember">
+            <span>Keep me signed in on this device</span>
+          </label>
+          <p class="meter__note" style="margin-top:var(--s-1)"
+             x-text="auth.remember
+               ? 'Stored until you sign out. Use only on a machine you trust.'
+               : 'Stored for this tab only — closing it signs you out.'"></p>
+          <template x-if="auth.error">
+            <p class="well" style="margin-top:var(--s-3);color:var(--bad)" x-text="auth.error"></p>
+          </template>
+          <div class="modal__foot" style="padding-inline:0;padding-bottom:0;border:none">
+            <button class="btn" type="button" @click="auth.open = false">Cancel</button>
+            <button class="btn btn--primary" type="submit"
+                    :class="{ 'is-busy': auth.busy }" :disabled="!auth.password || auth.busy">
+              Sign in
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </template>
+
+  <!-- ══════════════════════════════════════════════════ change password ══ -->
+  <template x-if="passwordForm.open">
+    <div class="modal">
+      <div class="scrim" @click="passwordForm.open = false"></div>
+      <div class="modal__card" role="dialog" aria-modal="true" aria-labelledby="pw-title">
+        <header class="modal__head">
+          <h2 class="panel__title" id="pw-title">Change admin password</h2>
+        </header>
+        <form class="modal__body" @submit.prevent="submitPasswordChange()">
+          <div class="field">
+            <label class="field__label" for="pw-current">Current password</label>
+            <input id="pw-current" class="input" type="password"
+                   autocomplete="current-password" x-model="passwordForm.current">
+          </div>
+          <div class="field" style="margin-top:var(--s-3)">
+            <label class="field__label" for="pw-next">New password</label>
+            <input id="pw-next" class="input" type="password" minlength="12"
+                   autocomplete="new-password" x-model="passwordForm.next"
+                   placeholder="at least 12 characters">
+          </div>
+          <div class="field" style="margin-top:var(--s-3)">
+            <label class="field__label" for="pw-confirm">Confirm new password</label>
+            <input id="pw-confirm" class="input" type="password"
+                   autocomplete="new-password" x-model="passwordForm.confirm">
+          </div>
+          <p class="meter__note" style="margin-top:var(--s-2);color:var(--warn)"
+             x-show="passwordForm.confirm && passwordForm.next !== passwordForm.confirm">
+            The two new entries do not match.
+          </p>
+          <template x-if="passwordForm.error">
+            <p class="well" style="margin-top:var(--s-3);color:var(--bad)"
+               x-text="passwordForm.error"></p>
+          </template>
+          <div class="modal__foot" style="padding-inline:0;padding-bottom:0;border:none">
+            <button class="btn" type="button" @click="passwordForm.open = false">Cancel</button>
+            <button class="btn btn--primary" type="submit" :class="{ 'is-busy': passwordForm.busy }"
+                    :disabled="passwordForm.busy || passwordForm.next.length < 12
+                               || passwordForm.next !== passwordForm.confirm">
+              Change password
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   </template>

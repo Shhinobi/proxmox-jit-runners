@@ -527,6 +527,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "message": "Admin password set. Keep it somewhere safe."}
 
+    @admin.post("/api/v1/admin/verify")
+    async def verify_admin() -> dict[str, object]:
+        """Check a password without performing an action.
+
+        Sign-in needs a way to tell "wrong password" from "action failed". The
+        admin dependency already ran to get here, so reaching the body means
+        the credential was accepted.
+        """
+        return {"ok": True}
+
     @admin.post("/api/v1/admin/password")
     async def change_password(request: Request) -> dict[str, object]:
         try:

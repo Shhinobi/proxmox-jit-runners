@@ -83,7 +83,7 @@ let activeDashboard = null;
 async function apiRequest(path, options) {
   const opts = { ...(options || {}) };
   opts.headers = { ...(opts.headers || {}) };
-  const token = sessionStorage.getItem(TOKEN_KEY);
+  const token = sessionStorage.getItem(TOKEN_KEY) || localStorage.getItem(TOKEN_KEY);
   if (token) opts.headers["X-Admin-Token"] = token;
   if (opts.body && !opts.headers["Content-Type"]) {
     opts.headers["Content-Type"] = "application/json";
@@ -93,7 +93,7 @@ async function apiRequest(path, options) {
   let body = null;
   try { body = text ? JSON.parse(text) : null; } catch { body = { detail: text }; }
   if (!response.ok) {
-    if (response.status === 401 && activeDashboard) activeDashboard.promptForToken();
+    if (response.status === 401 && activeDashboard) activeDashboard.onUnauthorized();
     const detail = (body && (body.detail || body.message)) || `HTTP ${response.status}`;
     throw new Error(detail);
   }
@@ -177,6 +177,8 @@ function dashboard() {
     retryDelay: 1000,
 
     setup: { claimed: true, can_claim: false, claim_window_seconds: 0 },
+    auth: { open: false, password: "", remember: false, busy: false, error: "" },
+    passwordForm: { open: false, current: "", next: "", confirm: "", busy: false, error: "" },
     setupForm: { password: "", confirm: "" },
     filters: { repository: "", status: "", mode: "", q: "" },
     logFilters: { level: "all", category: "all" },
@@ -486,17 +488,83 @@ function dashboard() {
       if (box && box.resolve) box.resolve(ok);
     },
 
-    promptForToken() {
-      const token = window.prompt(
-        "Admin actions require a token (api.admin_token_file on the server)."
-      );
-      if (token) sessionStorage.setItem(TOKEN_KEY, token.trim());
+    /* --- signing in --------------------------------------------------
+       There is one credential, so "signing in" means holding the admin
+       password in the browser so admin actions stop asking for it. Where it is
+       held is the user's choice: this tab only, or this device until signed
+       out. */
+    openSignIn() {
+      this.auth = { open: true, password: "", remember: false, busy: false, error: "" };
+      this.$nextTick(() => document.getElementById("signin-password")?.focus());
+    },
+    async submitSignIn() {
+      if (!this.auth.password) return;
+      this.auth.busy = true;
+      this.auth.error = "";
+      try {
+        // Verified against a real admin call rather than trusted blindly, so a
+        // wrong password is caught here instead of failing the next action.
+        await apiRequest("/api/v1/admin/verify", {
+          method: "POST",
+          headers: { "X-Admin-Token": this.auth.password },
+        });
+        this.storeToken(this.auth.password, this.auth.remember);
+        this.auth.open = false;
+        this.auth.password = "";
+        this.toast("ok", "Signed in", this.rememberMe ? "Saved on this device." : "This tab only.");
+      } catch (error) {
+        this.auth.error = String(error.message || error);
+      } finally {
+        this.auth.busy = false;
+      }
+    },
+    storeToken(value, remember) {
+      sessionStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(TOKEN_KEY);
+      (remember ? localStorage : sessionStorage).setItem(TOKEN_KEY, value);
+      this.tick++;
     },
     signOut() {
       sessionStorage.removeItem(TOKEN_KEY);
-      this.toast("ok", "Signed out", "The admin token was cleared from this tab.");
+      localStorage.removeItem(TOKEN_KEY);
+      this.tick++;
+      this.toast("ok", "Signed out", "Admin actions will ask for the password again.");
     },
-    get hasToken() { return Boolean(sessionStorage.getItem(TOKEN_KEY)); },
+    get hasToken() {
+      void this.tick;
+      return Boolean(sessionStorage.getItem(TOKEN_KEY) || localStorage.getItem(TOKEN_KEY));
+    },
+    get rememberMe() {
+      void this.tick;
+      return Boolean(localStorage.getItem(TOKEN_KEY));
+    },
+
+    /* --- changing the password ---------------------------------------- */
+    openPasswordChange() {
+      this.passwordForm = { open: true, current: "", next: "", confirm: "", busy: false, error: "" };
+      this.$nextTick(() => document.getElementById("pw-current")?.focus());
+    },
+    async submitPasswordChange() {
+      const f = this.passwordForm;
+      if (f.next.length < 12 || f.next !== f.confirm) return;
+      f.busy = true;
+      f.error = "";
+      try {
+        await apiRequest("/api/v1/admin/password", {
+          method: "POST",
+          body: JSON.stringify({ current: f.current, new: f.next }),
+        });
+        // The old one is dead; keep the browser signed in with the new one
+        // rather than silently leaving a stale credential behind.
+        this.storeToken(f.next, this.rememberMe);
+        this.passwordForm.open = false;
+        this.toast("ok", "Password changed", "This browser is still signed in.");
+      } catch (error) {
+        f.error = String(error.message || error);
+      } finally {
+        f.busy = false;
+      }
+    },
 
     async adminAction(name, path, opts) {
       if (state.actionInFlight) {
@@ -631,7 +699,9 @@ function dashboard() {
           run: () => this.adminAction("Recycle ready", "/api/v1/admin/recycle-ready") },
         { label: "Scan for drift", hint: "action", run: () => { this.go("drift"); this.loadDrift(); } },
         { label: "Toggle theme", hint: "action", run: () => this.cycleTheme() },
-        { label: "Clear admin token", hint: "action", run: () => this.signOut() },
+        { label: "Sign in", hint: "action", run: () => this.openSignIn() },
+        { label: "Change admin password", hint: "action", run: () => this.openPasswordChange() },
+        { label: "Sign out", hint: "action", run: () => this.signOut() },
       ];
       const items = [...actions, ...nav];
       const q = this.palette.query.toLowerCase().trim();
@@ -654,6 +724,8 @@ function dashboard() {
       }
       if (e.key === "Escape") {
         if (this.palette.open) { this.palette.open = false; return; }
+        if (this.auth.open) { this.auth.open = false; return; }
+        if (this.passwordForm.open) { this.passwordForm.open = false; return; }
         if (this.confirmBox) { this.resolveConfirm(false); return; }
         if (this.drawer) { this.drawer = null; return; }
       }

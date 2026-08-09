@@ -460,3 +460,46 @@ def test_dependencies_endpoint_reports_setup_state(tmp_path: Path) -> None:
     assert client.get("/api/v1/dependencies").json()["admin_auth"]["claimed"] is False
     client.post("/api/v1/setup/claim", json={"password": "correct-horse-battery"})
     assert client.get("/api/v1/dependencies").json()["admin_auth"]["claimed"] is True
+
+
+def test_verify_endpoint_distinguishes_wrong_password_from_failed_action(
+    tmp_path: Path,
+) -> None:
+    """Sign-in needs to tell a bad password from an action that went wrong."""
+    client, _ = _setup_client(str(tmp_path))
+    client.post("/api/v1/setup/claim", json={"password": "correct-horse-battery"})
+
+    assert client.post("/api/v1/admin/verify").status_code == 401
+    assert client.post("/api/v1/admin/verify", headers={"X-Admin-Token": "nope"}).status_code == 401
+    ok = client.post("/api/v1/admin/verify", headers={"X-Admin-Token": "correct-horse-battery"})
+    assert ok.status_code == 200
+    assert ok.json()["ok"] is True
+
+
+def test_ui_reports_admin_state_from_the_field_the_api_sends() -> None:
+    """Regression: the panel read `admin_auth.enabled`, a field that had been
+    renamed to `claimed`, so a secured instance was reported as unprotected --
+    a security control stating the opposite of the truth."""
+    from orchestrator.api import ui_directory
+
+    html = (ui_directory() / "index.html").read_text(encoding="utf-8")
+    assert "admin_auth?.enabled" not in html
+    assert "admin_auth?.claimed" in html
+
+
+def test_ui_offers_sign_in_change_password_and_sign_out() -> None:
+    ui = ui_directory_for_test()
+    html = (ui / "index.html").read_text(encoding="utf-8")
+    js = (ui / "js" / "app.js").read_text(encoding="utf-8")
+    for hook in ("openSignIn", "openPasswordChange", "signOut"):
+        assert hook in html, f"{hook} has no affordance in the UI"
+        assert hook in js, f"{hook} is not implemented"
+    # The password must be able to persist beyond the tab, by explicit choice.
+    assert "Keep me signed in on this device" in html
+    assert "localStorage" in js
+
+
+def ui_directory_for_test():
+    from orchestrator.api import ui_directory
+
+    return ui_directory()
