@@ -22,18 +22,20 @@ def configure_telemetry(app: Any) -> None:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-    resource = Resource.create(
-        {
-            "service.name": "runner-orchestrator",
-            "service.namespace": "infra-cluster",
-            "deployment.environment": "homelab",
-            "lxc.ctid": "150",
-            "pve.node": "pve",
-            "infra.managed_by": "infra-cluster",
-            "infra.resource.type": "runner-orchestrator",
-            "infra.resource.role": "control-plane",
-        }
-    )
+    # Site identifiers come from the environment. They used to be hardcoded to
+    # one particular deployment, which is both wrong for anyone else and a
+    # detail a public repository should not carry. Anything unset is omitted
+    # rather than exported empty.
+    attributes = {
+        "service.name": os.environ.get("OTEL_SERVICE_NAME", "runner-orchestrator"),
+        "service.namespace": os.environ.get("OTEL_SERVICE_NAMESPACE", ""),
+        "deployment.environment": os.environ.get("OTEL_DEPLOYMENT_ENVIRONMENT", ""),
+        "pve.node": os.environ.get("PVE_NODE", ""),
+        "lxc.ctid": os.environ.get("LXC_CTID", ""),
+        "infra.resource.type": "runner-orchestrator",
+        "infra.resource.role": "control-plane",
+    }
+    resource = Resource.create({k: v for k, v in attributes.items() if v})
     provider = TracerProvider(resource=resource)
     exporter = OTLPSpanExporter(
         endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317"),

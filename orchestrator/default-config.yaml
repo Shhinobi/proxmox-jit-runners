@@ -46,7 +46,7 @@ broker:
 cache:
   root: /srv/runner-cache
   mount_path: /cache
-  # Usage/quota (80% / 40GiB per repo) is enforced on pve by
+  # Usage/quota (80% / 40GiB per repo) is enforced on the Proxmox node by
   # runner-ct-broker.sh (RUNNER_CACHE_MAX_PERCENT / RUNNER_CACHE_QUOTA_GB),
   # not by the orchestrator — there's no field here for it.
   # Automatic GC is disabled: every reconciliation would open an SSH broker
@@ -67,6 +67,58 @@ capacity:
   warm_max_age_seconds: 14400
   warm_destroy_on_failure: true
   warm_min_root_mib: 2048
+  # Wall clock one reconcile pass may spend before deferring the rest to the
+  # next one. Bounds how long a dead dependency can stall the loop; must be
+  # >= 30 and comfortably above one worst-case container teardown.
+  reconcile_budget_seconds: 45
+  # Retire idle pool containers past this age (0 disables). A week-old clone of
+  # a golden template that has since been rebuilt is not what you think it is.
+  pool_max_age_seconds: 86400
+  # How often to probe GitHub/Proxmox/broker out of band. This runs on its
+  # own task: during the thin-pool exhaustion incident the reconcile loop was the only
+  # thing touching GitHub, so when it stalled nothing was left to notice why.
+  dependency_probe_seconds: 30
+
+# Admission control against the storage runners clone into. `max_active` is a
+# count, not a budget: without this section nothing connects "11 active
+# runners" to "11 x rootfs_gb of thin pool", which is how a pool shared with
+# other production workloads reached 91% unnoticed.
+storage:
+  guard_enabled: true
+  # Hard floor. Below either of these, speculative replenishment is refused;
+  # real queued jobs are requeued (never failed) until space returns.
+  min_free_gb: 100
+  max_used_percent: 80.0
+  # Soft floor: still allowed, but alerted on.
+  warn_free_gb: 150
+  poll_seconds: 60
+  # Your declared share of a shared pool. 0 = report projected demand at
+  # startup but do not enforce it.
+  #
+  # Leave this at 0 unless you know you want the worst case enforced. Projected
+  # demand is computed as max_active x rootfs_gb, i.e. every container filling
+  # its whole root filesystem. Thin provisioning means real usage is far lower:
+  # measured on a live cluster, a warm runner occupied roughly a quarter of
+  # its provisioned rootfs. So `max_active: 11` with `rootfs_gb: 25` projects
+  # 275 GiB but costs nearer 65 GiB in practice.
+  #
+  # The protection that actually matters for a shared pool is min_free_gb /
+  # max_used_percent below, which act on the real reading. Set total_budget_gb
+  # only if you want a hard config-time ceiling on the worst case as well.
+  total_budget_gb: 0
+  # If the storage reading itself fails, allow clones rather than halting CI.
+  fail_open: true
+
+# Protection for POST/PUT /api/v1/admin/*. Without a token these routes are
+# open to anything that can reach the port — drain, policy rewrite, cache
+# purge, container destroy.
+api:
+  # Provide via a systemd credential, e.g.
+  #   LoadCredential=runner_orchestrator_admin_token:/etc/runner-orchestrator/admin-token
+  admin_token_file: ""
+  # Leave true only while migrating; the dashboard shows a standing alert while
+  # it is. Set false once a token is provisioned.
+  allow_unauthenticated_admin: true
 
 profiles:
   crossbuild-small:

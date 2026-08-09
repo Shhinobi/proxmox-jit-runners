@@ -31,6 +31,10 @@ class JobListItem(TypedDict, total=False):
     github_run_url: str
     github_job_url: str
     duration_seconds: int | None
+    provisioned_at: int | None
+    started_at: int | None
+    start_source: str | None
+    phases: dict[str, int]
 
 
 class InstanceListItem(TypedDict, total=False):
@@ -47,5 +51,8 @@ class InstanceListItem(TypedDict, total=False):
     last_used_at: int | None
     error: str | None
     delete_attempts: int
+    delete_not_before: int | None
+    ct_missing_since: int | None
+    use_count: int
     github_run_url: str
     github_job_url: str

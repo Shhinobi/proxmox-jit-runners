@@ -153,7 +153,7 @@ class ProxmoxClient:
                 "dest": "10.0.1.20/32",
                 "proto": "tcp",
                 "dport": "22",
-                "comment": "Allow deploy rsync/ssh to example-app a deploy target",
+                "comment": "Allow deploy over SSH",
             },
             {
                 "type": "out",
@@ -279,6 +279,29 @@ class ProxmoxClient:
             ):
                 return
             raise
+
+    async def probe(self) -> float:
+        """Cheap liveness check against the Proxmox API, in seconds."""
+        started = asyncio.get_running_loop().time()
+        await self.request("GET", "/version")
+        return asyncio.get_running_loop().time() - started
+
+    async def list_node_cts(self) -> list[dict[str, Any]]:
+        """Every LXC on this node, with name/status/tags where PVE reports them."""
+        data = await self.request("GET", f"/nodes/{self.config.node}/lxc")
+        return [dict(item) for item in (data or []) if isinstance(item, dict)]
+
+    async def storage_status(self, storage: str | None = None) -> dict[str, Any]:
+        """Free/used/total bytes for a storage on this node.
+
+        Nothing in the orchestrator asked this before, which is why a thin pool
+        it was actively filling could reach 91% without the system noticing.
+        """
+        name = storage or self.config.storage
+        data = await self.request(
+            "GET", f"/nodes/{self.config.node}/storage/{quote(name, safe='')}/status"
+        )
+        return dict(data or {})
 
     async def status(self, vmid: int) -> dict[str, Any]:
         data = await self.request("GET", f"/nodes/{self.config.node}/lxc/{vmid}/status/current")

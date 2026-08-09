@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+LOGGER = logging.getLogger("runner_orchestrator")
 
 
 class ConfigError(ValueError):
@@ -82,7 +85,9 @@ class ProxmoxConfig:
 
 @dataclass(frozen=True)
 class BrokerConfig:
-    host: str = "10.0.1.5"
+    # No default: the broker runs on your Proxmox host, and guessing an
+    # address would silently point a fresh install at someone else's network.
+    host: str = ""
     user: str = "runner-broker"
     key_file: str = "/run/credentials/runner_broker_ssh_key"
     known_hosts_file: str = "/etc/runner-orchestrator/ssh_known_hosts"
@@ -92,13 +97,47 @@ class BrokerConfig:
 class CacheConfig:
     root: str = "/srv/runner-cache"
     mount_path: str = "/cache"
-    # Usage/quota enforcement lives entirely on pve in runner-ct-broker.sh
+    # Usage/quota enforcement lives entirely on the Proxmox host, in the
+    # broker script
     # (RUNNER_CACHE_MAX_PERCENT / RUNNER_CACHE_QUOTA_GB) — there is no field
     # here for it. The dashboard reads those values from the broker's own
     # cache-list output, not from this config.
     # Auto-GC orphan dirs (not on allowlist) older than N days during reconcile.
     # 0 disables automatic GC (manual purge/gc via API still works).
     gc_orphan_days: int = 7
+
+
+@dataclass(frozen=True)
+class ApiConfig:
+    """Protection for the mutating API surface."""
+
+    admin_token_file: str = ""
+    allow_unauthenticated_admin: bool = True
+    """Permitted for one release so an existing deployment does not break on
+    restart; flipped to False once operators have provisioned a token."""
+
+
+@dataclass(frozen=True)
+class StorageConfig:
+    """Admission control against the Proxmox storage the runners clone into.
+
+    `max_active` is a *count*, not a budget: nothing ever multiplied it by
+    `rootfs_gb` or compared the result to real free space. This section is the
+    resource dimension that was missing.
+    """
+
+    guard_enabled: bool = True
+    min_free_gb: int = 100
+    """Hard floor. Below this, speculative capacity is refused."""
+    max_used_percent: float = 80.0
+    """Hard floor expressed as a ratio; whichever binds first wins."""
+    warn_free_gb: int = 150
+    """Soft floor: still allowed, but alerted on."""
+    poll_seconds: int = 60
+    total_budget_gb: int = 0
+    """The orchestrator's declared share of a shared pool. 0 = warn only."""
+    fail_open: bool = True
+    """If the status query itself fails, allow clones rather than halting CI."""
 
 
 @dataclass(frozen=True)
@@ -114,6 +153,16 @@ class CapacityConfig:
     warm_max_age_seconds: int = 14400  # 4h
     warm_destroy_on_failure: bool = True
     warm_min_root_mib: int = 2048  # destroy if rootfs free space below this after clean
+    # Wall-clock a single reconcile pass may spend before deferring the rest.
+    # Must exceed one worst-case teardown or nothing ever completes; validated below.
+    reconcile_budget_seconds: int = 45
+    # Retire idle pool containers past this age (0 disables). A week-old clone of
+    # a golden template that has since been rebuilt is not what the operator thinks.
+    pool_max_age_seconds: int = 86400
+    # How often the out-of-band dependency probe runs. Independent of the
+    # reconcile loop on purpose: a probe sharing the loop it diagnoses is
+    # useless exactly when that loop stalls.
+    dependency_probe_seconds: int = 30
 
 
 # Fields the dashboard may edit at runtime (persisted in repositories-override.yaml).
@@ -129,6 +178,10 @@ class Settings:
     capacity: CapacityConfig
     repositories: dict[str, RepositoryPolicy]
     profiles: dict[str, RunnerProfile]
+    # Defaulted so every existing construction keeps working; the guard is on
+    # by default but only bites once a real storage reading contradicts it.
+    storage: StorageConfig = field(default_factory=StorageConfig)
+    api: ApiConfig = field(default_factory=ApiConfig)
     database_path: str = "/var/lib/runner-orchestrator/state.db"
     log_level: str = "INFO"
     shadow_mode: bool = True
@@ -216,6 +269,9 @@ def parse_capacity_config(
         "warm_max_age_seconds": int(seed.warm_max_age_seconds),
         "warm_destroy_on_failure": bool(seed.warm_destroy_on_failure),
         "warm_min_root_mib": int(seed.warm_min_root_mib),
+        "reconcile_budget_seconds": int(seed.reconcile_budget_seconds),
+        "pool_max_age_seconds": int(seed.pool_max_age_seconds),
+        "dependency_probe_seconds": int(seed.dependency_probe_seconds),
     }
     int_keys = {
         "max_active",
@@ -227,6 +283,9 @@ def parse_capacity_config(
         "warm_max_uses",
         "warm_max_age_seconds",
         "warm_min_root_mib",
+        "reconcile_budget_seconds",
+        "pool_max_age_seconds",
+        "dependency_probe_seconds",
     }
     for key in int_keys:
         if key in raw and raw[key] is not None:
@@ -254,7 +313,79 @@ def parse_capacity_config(
         raise ConfigError("capacity.warm_max_age_seconds must be >= 60")
     if values["warm_min_root_mib"] < 256:
         raise ConfigError("capacity.warm_min_root_mib must be >= 256")
+    if values["pool_max_age_seconds"] < 0:
+        raise ConfigError("capacity.pool_max_age_seconds must be >= 0")
+    # A budget below one worst-case teardown would truncate every pass before
+    # anything finished, which is worse than no budget at all.
+    if values["dependency_probe_seconds"] < 5:
+        raise ConfigError("capacity.dependency_probe_seconds must be >= 5")
+    if values["reconcile_budget_seconds"] < 30:
+        raise ConfigError("capacity.reconcile_budget_seconds must be >= 30")
     return CapacityConfig(**values)
+
+
+def parse_storage_config(raw: Any, seed: StorageConfig) -> StorageConfig:
+    if raw is None:
+        return seed
+    if not isinstance(raw, dict):
+        raise ConfigError("storage must be a mapping")
+    values: dict[str, Any] = {
+        "guard_enabled": bool(seed.guard_enabled),
+        "min_free_gb": int(seed.min_free_gb),
+        "max_used_percent": float(seed.max_used_percent),
+        "warn_free_gb": int(seed.warn_free_gb),
+        "poll_seconds": int(seed.poll_seconds),
+        "total_budget_gb": int(seed.total_budget_gb),
+        "fail_open": bool(seed.fail_open),
+    }
+    for key in ("min_free_gb", "warn_free_gb", "poll_seconds", "total_budget_gb"):
+        if key in raw and raw[key] is not None:
+            try:
+                values[key] = int(raw[key])
+            except (TypeError, ValueError) as exc:
+                raise ConfigError(f"storage.{key} must be an integer") from exc
+    if "max_used_percent" in raw and raw["max_used_percent"] is not None:
+        try:
+            values["max_used_percent"] = float(raw["max_used_percent"])
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("storage.max_used_percent must be a number") from exc
+    for key in ("guard_enabled", "fail_open"):
+        if key in raw and raw[key] is not None:
+            values[key] = bool(raw[key])
+    if values["min_free_gb"] < 0:
+        raise ConfigError("storage.min_free_gb must be >= 0")
+    if not 1.0 <= values["max_used_percent"] <= 100.0:
+        raise ConfigError("storage.max_used_percent must be between 1 and 100")
+    if values["poll_seconds"] < 5:
+        raise ConfigError("storage.poll_seconds must be >= 5")
+    if values["total_budget_gb"] < 0:
+        raise ConfigError("storage.total_budget_gb must be >= 0")
+    return StorageConfig(**values)
+
+
+def projected_disk_demand_gb(
+    capacity: CapacityConfig,
+    repositories: dict[str, RepositoryPolicy],
+    profiles: dict[str, RunnerProfile],
+) -> int:
+    """Worst-case disk the current configuration is allowed to consume.
+
+    `rootfs_gb` existed but was only ever echoed to the dashboard, so nothing
+    connected "max_active = 11" to "11 x 25 GiB of thin pool". Thin provisioning
+    means this over-estimates day-one usage — conservative in the right
+    direction, since clones grow toward it.
+    """
+    warm_gb = 0
+    warm_slots = 0
+    for policy in repositories.values():
+        profile = profiles.get(policy.profile) or profiles[DEFAULT_PROFILE_NAME]
+        warm_gb += int(policy.warm_capacity) * int(profile.rootfs_gb)
+        warm_slots += int(policy.warm_capacity)
+    default_rootfs = int(profiles[DEFAULT_PROFILE_NAME].rootfs_gb)
+    pool_gb = int(capacity.pool_size) * default_rootfs
+    largest = max((int(p.rootfs_gb) for p in profiles.values()), default=default_rootfs)
+    spare_slots = max(0, int(capacity.max_active) - warm_slots - int(capacity.pool_size))
+    return warm_gb + pool_gb + spare_slots * largest
 
 
 def validate_capacity_budget(
@@ -512,7 +643,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
 
     broker_raw = raw.get("broker", {})
     broker = BrokerConfig(
-        host=str(broker_raw.get("host", "10.0.1.5")),
+        host=str(broker_raw.get("host", "")),
         user=str(broker_raw.get("user", "runner-broker")),
         key_file=_secret_override(
             str(broker_raw.get("key_file", "/run/credentials/runner_broker_ssh_key")),
@@ -538,6 +669,31 @@ def load_settings(path: str | Path | None = None) -> Settings:
     validate_repository_profiles(repositories, profiles)
     if proxmox.vmid_start > proxmox.vmid_end or proxmox.ip_start > proxmox.ip_end:
         raise ConfigError("invalid Proxmox VMID or IP range")
+    storage = parse_storage_config(raw.get("storage"), StorageConfig())
+    api_raw = raw.get("api") or {}
+    if not isinstance(api_raw, dict):
+        raise ConfigError("api must be a mapping")
+    api = ApiConfig(
+        admin_token_file=_secret_override(
+            str(api_raw.get("admin_token_file", "")),
+            "RUNNER_ORCHESTRATOR_ADMIN_TOKEN_FILE",
+        ),
+        allow_unauthenticated_admin=bool(api_raw.get("allow_unauthenticated_admin", True)),
+    )
+    # Warning, not an error, by default. `load_settings()` runs at import via
+    # `create_app()`, so a new hard failure here would brick a running
+    # deployment on its next restart. Operators opt in with total_budget_gb.
+    projected = projected_disk_demand_gb(capacity, repositories, profiles)
+    if storage.total_budget_gb > 0 and projected > storage.total_budget_gb:
+        raise ConfigError(
+            f"projected disk demand {projected} GiB exceeds storage.total_budget_gb "
+            f"({storage.total_budget_gb} GiB); lower max_active/warm_capacity/pool_size"
+        )
+    if storage.total_budget_gb == 0:
+        LOGGER.info(
+            "projected worst-case disk demand is %d GiB; set storage.total_budget_gb to enforce it",
+            projected,
+        )
     return Settings(
         github=github,
         proxmox=proxmox,
@@ -546,6 +702,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
         capacity=capacity,
         repositories=repositories,
         profiles=profiles,
+        storage=storage,
+        api=api,
         database_path=str(raw.get("database_path", "/var/lib/runner-orchestrator/state.db")),
         log_level=str(raw.get("log_level", "INFO")),
         shadow_mode=bool(raw.get("shadow_mode", True)),

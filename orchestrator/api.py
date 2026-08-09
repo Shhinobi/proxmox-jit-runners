@@ -6,12 +6,14 @@ from typing import Any
 
 from prometheus_client import REGISTRY
 
+from .auth import admin_auth_status
 from .config import (
     ConfigError,
     Settings,
     capacity_runtime_to_dict,
     parse_capacity_config,
     parse_repository_policies,
+    projected_disk_demand_gb,
     repository_policy_to_dict,
     save_repository_policies,
     validate_capacity_budget,
@@ -19,7 +21,13 @@ from .config import (
 )
 from .models import InstanceListItem
 from .policy import cache_slug
-from .service import DRAIN_MARKER, Orchestrator
+from .service import (
+    DRAIN_MARKER,
+    DRIFT_CTS_WITHOUT_ROW,
+    DRIFT_ROWS_WITHOUT_CT,
+    RECONCILE_LAST_SUCCESS,
+    Orchestrator,
+)
 
 
 def public_policies(settings: Settings) -> dict[str, Any]:
@@ -63,7 +71,7 @@ def public_policies(settings: Settings) -> dict[str, Any]:
         "warm_target": warm_target,
         "broker_note": (
             "Saving policies updates the orchestrator immediately and syncs the broker "
-            "allowlist on pve. Capacity max_active is global and must cover "
+            "allowlist on the Proxmox host. Capacity max_active is global and must cover "
             "sum(warm_capacity) + pool_size. GitHub App access must still include each "
             "repository."
         ),
@@ -103,7 +111,7 @@ async def apply_repository_policies(
     new_repos = set(parsed.keys())
 
     cache_ops: list[str] = []
-    # Explicit renames from the UI (e.g. OldOwner/X → acme/X).
+    # Explicit renames from the UI (e.g. after a GitHub handle change).
     for item in cache_renames or []:
         src = str(item.get("from") or "").strip()
         dst = str(item.get("to") or "").strip()
@@ -179,7 +187,7 @@ async def apply_repository_policies(
         "broker_synced": True,
         "broker_result": broker_result,
         "broker_note": (
-            "Broker allowlist on pve was updated automatically. "
+            "Broker allowlist on the Proxmox host was updated automatically. "
             "GitHub App access must still include each repository."
         ),
         "cache_ops": cache_ops,
@@ -419,6 +427,86 @@ def build_alerts(
                 ),
             }
         )
+    storage = overview.get("storage") or {}
+    used_ratio = float(storage.get("used_ratio") or 0.0)
+    if storage.get("admits") is False:
+        alerts.append(
+            {
+                "severity": "critical",
+                "code": "storage_blocked",
+                "message": (
+                    f"Replenishment is blocked: {storage.get('reason')}. "
+                    "Queued jobs will wait rather than fail."
+                ),
+            }
+        )
+    elif used_ratio >= float(storage.get("floor_ratio") or 0.8):
+        alerts.append(
+            {
+                "severity": "warning",
+                "code": "storage_low",
+                "message": f"Runner storage is {used_ratio * 100:.1f}% used.",
+            }
+        )
+
+    circuit = (overview.get("dependencies") or {}).get("github_api") or {}
+    if circuit.get("state") == "open":
+        alerts.append(
+            {
+                "severity": "critical",
+                "code": "github_unreachable",
+                "message": (
+                    "Cannot reach api.github.com; the circuit is open. Containers are "
+                    "still torn down locally and deregistrations are queued."
+                ),
+            }
+        )
+    elif circuit.get("state") == "half_open":
+        alerts.append(
+            {
+                "severity": "warning",
+                "code": "github_recovering",
+                "message": "GitHub connectivity is being re-probed after a failure.",
+            }
+        )
+
+    pending = int(overview.get("pending_deregistrations") or 0)
+    if pending:
+        alerts.append(
+            {
+                "severity": "info",
+                "code": "deregistrations_queued",
+                "message": (
+                    f"{pending} GitHub deregistration(s) queued from local-only teardowns; "
+                    "they settle automatically once GitHub is reachable."
+                ),
+            }
+        )
+
+    reconcile = overview.get("reconcile") or {}
+    last_success = reconcile.get("last_success_age_seconds")
+    if last_success is not None and int(last_success) > 300:
+        alerts.append(
+            {
+                "severity": "critical",
+                "code": "reconcile_stalled",
+                "message": f"No clean reconcile pass for {int(last_success)}s.",
+            }
+        )
+
+    auth = overview.get("admin_auth") or {}
+    if not auth.get("enabled"):
+        alerts.append(
+            {
+                "severity": "warning",
+                "code": "admin_unauthenticated",
+                "message": (
+                    "Admin actions are unauthenticated. Set api.admin_token_file to "
+                    "require a token for drain, policy changes, and container destroy."
+                ),
+            }
+        )
+
     cleanup = metrics.get("cleanup_failures_total") or {}
     if any(float(v) > 0 for v in cleanup.values()):
         alerts.append(
@@ -448,6 +536,30 @@ async def build_overview(orchestrator: Orchestrator, settings: Settings) -> dict
         if row["status"] == "delete_failed":
             delete_failed += int(row["total"])
     warm_target = sum(int(policy.warm_capacity) for policy in settings.repositories.values())
+
+    # The resource the incident actually ran out of. Cached inside the
+    # orchestrator, so this stays cheap enough for the SSE tick.
+    snapshot = await orchestrator.storage_snapshot()
+    admits, admit_reason = await orchestrator.storage_admits(purpose="overview")
+    demand_gb = projected_disk_demand_gb(
+        settings.capacity, settings.repositories, settings.profiles
+    )
+    storage_block = {
+        "storage": settings.proxmox.storage,
+        "node": settings.proxmox.node,
+        "total_bytes": snapshot.total_bytes if snapshot else None,
+        "used_bytes": snapshot.used_bytes if snapshot else None,
+        "avail_bytes": snapshot.avail_bytes if snapshot else None,
+        "used_ratio": snapshot.used_ratio if snapshot else None,
+        "floor_ratio": settings.storage.max_used_percent / 100.0,
+        "min_free_gb": settings.storage.min_free_gb,
+        "admits": admits,
+        "reason": admit_reason,
+        "projected_demand_bytes": demand_gb * 1024**3,
+    }
+    pending_deregistrations = await orchestrator.db.count_pending_deregistrations()
+    last_success = RECONCILE_LAST_SUCCESS._value.get()
+    reconcile_age = int(time.time() - last_success) if last_success else None
     queued = next((int(row["total"]) for row in summary["jobs"] if row["status"] == "queued"), 0)
     drain = orchestrator.draining
     # Operational status for the dashboard primary badge (health probes keep
@@ -480,6 +592,25 @@ async def build_overview(orchestrator: Orchestrator, settings: Settings) -> dict
             "oldest_queued_job_age_seconds": oldest_queued,
         },
         "summary": summary,
+        "storage": storage_block,
+        "dependencies": {
+            "github_api": {
+                **orchestrator.github.breaker.snapshot(),
+                **(orchestrator.dependencies.get("github_api") or {}),
+            },
+            **{
+                name: state
+                for name, state in orchestrator.dependencies.items()
+                if name != "github_api"
+            },
+        },
+        "pending_deregistrations": pending_deregistrations,
+        "admin_auth": admin_auth_status(settings),
+        "reconcile": {
+            "last_success_age_seconds": reconcile_age,
+            "interval_seconds": settings.capacity.reconcile_seconds,
+            "budget_seconds": settings.capacity.reconcile_budget_seconds,
+        },
         "proxmox": {
             "node": settings.proxmox.node,
             "template_vmid": settings.proxmox.template_vmid,
@@ -512,6 +643,12 @@ async def build_dashboard_snapshot(
     logs = orchestrator.events.list(limit=150)
     return {
         "overview": overview,
+        # Counts only — the full drift scan hits the hypervisor and is an
+        # explicit operator action, not something to run on every SSE tick.
+        "drift_counts": {
+            "rows_without_container": DRIFT_ROWS_WITHOUT_CT._value.get(),
+            "containers_without_row": DRIFT_CTS_WITHOUT_ROW._value.get(),
+        },
         "alerts": alerts,
         "instances": instances,
         "jobs": jobs,

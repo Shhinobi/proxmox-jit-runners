@@ -33,7 +33,7 @@ class BrokerClient:
         ]
 
     # ConnectTimeout only bounds the SSH handshake; a hung remote script (or a
-    # broken pve) would otherwise stall the calling task forever.
+    # an unreachable Proxmox host) would otherwise stall the calling task forever.
     _COMMAND_TIMEOUT_SECONDS = 120.0
 
     async def _run(self, command: str, payload: bytes = b"") -> str:
