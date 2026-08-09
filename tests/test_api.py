@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 from unittest import mock
@@ -16,7 +17,16 @@ from orchestrator.api import (
     set_drain,
     ui_directory,
 )
-from orchestrator.config import ConfigError, load_settings, save_repository_policies
+from orchestrator.config import (
+    DEFAULT_PROFILE_NAME,
+    ApiConfig,
+    CapacityConfig,
+    ConfigError,
+    RunnerProfile,
+    StorageConfig,
+    load_settings,
+    save_repository_policies,
+)
 from orchestrator.db import Database
 from orchestrator.eventlog import EventLog
 from orchestrator.service import Orchestrator
@@ -63,40 +73,96 @@ def test_public_policies_includes_profiles_for_dashboard_selector() -> None:
 def test_ui_directory_contains_dashboard_assets() -> None:
     ui_dir = ui_directory()
     assert (ui_dir / "index.html").is_file()
-    assert (ui_dir / "app.js").is_file()
-    assert (ui_dir / "styles.css").is_file()
+    assert (ui_dir / "js" / "app.js").is_file()
+    assert (ui_dir / "css" / "tokens.css").is_file()
+    assert (ui_dir / "css" / "app.css").is_file()
+    assert (ui_dir / "vendor" / "alpinejs-3.15.12.min.js").is_file()
+
     html = (ui_dir / "index.html").read_text(encoding="utf-8")
+    js = (ui_dir / "js" / "app.js").read_text(encoding="utf-8")
     assert "Runner Orchestrator" in html
-    js = Path(ui_dir / "app.js").read_text(encoding="utf-8")
     assert "/api/v1/events" in js
-    assert "github_job_url" in js
-    assert "github_run_url" in js
+    assert "/api/v1/snapshot" in js
     assert "admin/drain" in js
     assert "confirmAction" in js
-    assert "confirm-modal" in html
+    # A custom modal, never window.confirm — the browser dialog blocks the
+    # event loop and cannot carry the destructive-action styling.
     assert re.search(r"(?<![.\w])confirm\s*\(", js) is None
-    assert 'data-tab="logs"' in html
-    assert "renderLogs" in js
-    assert "snapshot.logs" in js
-    assert "operationalBadge" in js
-    assert "draining" in js
-    assert "install-card" in html
-    assert "capacity-card" in html
+    assert 'role="alertdialog"' in html
+
+
+def test_ui_uses_only_design_tokens_for_colour() -> None:
+    """Components must not introduce raw colours.
+
+    The old stylesheet hardcoded hex values that ignored the light theme
+    entirely (the duration chart was drawn in #5b9dff regardless). Everything
+    in app.css now has to come from tokens.css.
+    """
+    css = (ui_directory() / "css" / "app.css").read_text(encoding="utf-8")
+    stripped = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    hexes = re.findall(r"#[0-9a-fA-F]{3,8}\b", stripped)
+    assert hexes == [], f"raw colours in app.css: {sorted(set(hexes))}"
+
+
+def test_ui_makes_no_external_requests() -> None:
+    """The dashboard must render identically on an air-gapped LAN."""
+    for name in ("index.html", "js/app.js", "css/app.css", "css/tokens.css"):
+        text = (ui_directory() / name).read_text(encoding="utf-8")
+        stripped = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        external = [
+            url
+            for url in re.findall(r"""(?:href|src)=["']([^"']+)["']""", stripped)
+            if url.startswith(("http://", "https://", "//"))
+        ]
+        assert external == [], f"{name} loads external assets: {external}"
+
+
+def test_ui_covers_every_dashboard_page() -> None:
+    """Each nav route must have a matching template, or it renders blank."""
+    ui_dir = ui_directory()
+    html = (ui_dir / "index.html").read_text(encoding="utf-8")
+    js = (ui_dir / "js" / "app.js").read_text(encoding="utf-8")
+    for route in (
+        "overview",
+        "runners",
+        "jobs",
+        "webhooks",
+        "capacity",
+        "dependencies",
+        "drift",
+        "logs",
+        "cache",
+        "policies",
+    ):
+        assert f"route === '{route}'" in html, f"no template for #/{route}"
+        assert f'"{route}"' in js, f"{route} missing from the router"
+
+
+def test_ui_surfaces_the_state_the_incident_needed() -> None:
+    """Regression guard on the design intent, not on markup details.
+
+    Storage, dependency health and the teardown backlog were all invisible in
+    the old dashboard; that is why a thin pool it was filling could reach 91%
+    unnoticed. They must stay on the page.
+    """
+    html = (ui_directory() / "index.html").read_text(encoding="utf-8")
+    assert "storage.used_ratio" in html
+    assert "floor" in html
+    assert "deps" in html
+    assert "pending_deregistrations" in html
+    assert "Teardown" in (ui_directory() / "js" / "app.js").read_text(encoding="utf-8")
+
+
+def test_ui_policies_editor_is_preserved() -> None:
+    """The policies store was the strongest part of the old UI; keep its contract."""
+    html = (ui_directory() / "index.html").read_text(encoding="utf-8")
+    js = (ui_directory() / "js" / "app.js").read_text(encoding="utf-8")
     assert "$store.policies" in html
     assert "alpine:init" in js
-    assert "Alpine.store(" in js
+    assert 'Alpine.store("policies"' in js
     assert "addInstallation" in js
-    assert "max_active" in js
-    assert "repo-card" in html
     assert "installation_id" in html
-    assert 'data-tab="cache"' in html
-    assert "loadCacheInventory" in js
-    assert "/api/v1/admin/cache/purge" in js
-    assert "alpinejs-3.15.12.min.js" in html
-    assert "apiRequest" in js
-    assert 'role="tab"' in html
-    assert 'role="tabpanel"' in html
-    assert 'lang="en"' in html
+    assert "max_active" in js
 
 
 def test_build_alerts_for_drain_and_delete_failed() -> None:
@@ -144,17 +210,39 @@ async def test_operational_status_prefers_draining_over_ready() -> None:
         async def oldest_queued_job_age(self):
             return 0
 
+        async def count_pending_deregistrations(self):
+            return 0
+
+    class _FakeBreaker:
+        @staticmethod
+        def snapshot():
+            return {"state": "closed", "consecutive_failures": 0, "last_error": None}
+
+    class _FakeGitHub:
+        breaker = _FakeBreaker()
+
     class _FakeOrch:
         draining = True
         db = _FakeDb()
+        github = _FakeGitHub()
+        dependencies: dict[str, dict[str, object]] = {}
 
         async def readiness(self):
             return True, {"database": True, "secrets": True, "cache": True}
 
+        async def storage_snapshot(self):
+            return None
+
+        async def storage_admits(self, *, purpose: str):
+            return True, "ok"
+
     class _Settings:
         shadow_mode = False
         repositories = {}
-        capacity = type("C", (), {"max_active": 2, "pool_size": 1})()
+        profiles = {DEFAULT_PROFILE_NAME: RunnerProfile()}
+        capacity = replace(CapacityConfig(), max_active=2, pool_size=1)
+        storage = StorageConfig()
+        api = ApiConfig()
         proxmox = type(
             "P",
             (),
@@ -163,6 +251,7 @@ async def test_operational_status_prefers_draining_over_ready() -> None:
                 "template_vmid": 9101,
                 "vmid_start": 5000,
                 "vmid_end": 5099,
+                "storage": "local-lvm",
             },
         )()
 
@@ -329,9 +418,7 @@ def test_save_policies_can_update_installation_account(tmp_path: Path) -> None:
     assert "acme/example-app" in loaded.repositories
     again = load_settings(cfg)
     assert again.github.installations["acme-personal"].account == "acme"
-    assert (
-        again.repositories["acme/example-app"].github_installation == "acme-personal"
-    )
+    assert again.repositories["acme/example-app"].github_installation == "acme-personal"
 
 
 @pytest.fixture
@@ -367,7 +454,7 @@ async def policy_orchestrator(
         cast(Any, fake_broker),
     )
     yield orch
-    await orch.stop()
+    await orch.stop(drain_seconds=0.5)
 
 
 async def test_apply_repository_policies_happy_path(

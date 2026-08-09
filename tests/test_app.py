@@ -302,3 +302,87 @@ def test_snapshot_route_returns_dashboard_payload(admin_test_client: TestClient)
     response = admin_test_client.get("/api/v1/snapshot")
     assert response.status_code == 200
     assert "instances" in response.json()
+
+
+# --- Admin authentication (RJIT-009) -----------------------------------------
+
+
+def _build_authed_client(tmp_dir: str, token: str) -> TestClient:
+    """A client whose app has an admin token provisioned."""
+    from orchestrator.config import ApiConfig
+
+    secret_path = Path(tmp_dir) / "webhook-secret"
+    secret_path.write_text("test-secret", encoding="utf-8")
+    token_path = Path(tmp_dir) / "admin-token"
+    token_path.write_text(token, encoding="utf-8")
+    base = settings(database_path=str(Path(tmp_dir) / "state.db"), shadow_mode=True)
+    cfg = replace(
+        base,
+        github=replace(base.github, webhook_secret_file=str(secret_path)),
+        api=ApiConfig(admin_token_file=str(token_path), allow_unauthenticated_admin=False),
+    )
+    app = create_app(cfg)
+    orchestrator: Orchestrator = app.state.orchestrator
+    asyncio.run(orchestrator.db.initialize())
+    orchestrator.github = cast(Any, FakeGitHub())
+    orchestrator.proxmox = cast(Any, FakeProxmox())
+    orchestrator.broker = cast(Any, FakeBroker())
+    return TestClient(app)
+
+
+def test_admin_route_rejects_a_missing_token(tmp_path: Path) -> None:
+    """Anything that could reach the port could previously drain the cluster."""
+    client = _build_authed_client(str(tmp_path), "s3cret")
+    assert client.post("/api/v1/admin/drain").status_code == 401
+
+
+def test_admin_route_rejects_a_wrong_token(tmp_path: Path) -> None:
+    client = _build_authed_client(str(tmp_path), "s3cret")
+    response = client.post("/api/v1/admin/drain", headers={"X-Admin-Token": "nope"})
+    assert response.status_code == 401
+
+
+def test_admin_route_accepts_bearer_and_header_forms(tmp_path: Path) -> None:
+    client = _build_authed_client(str(tmp_path), "s3cret")
+    # DRAIN_MARKER defaults to a system path this suite cannot write.
+    marker = tmp_path / "drain"
+    with (
+        mock.patch("orchestrator.api.DRAIN_MARKER", marker),
+        mock.patch("orchestrator.service.DRAIN_MARKER", marker),
+    ):
+        assert (
+            client.post("/api/v1/admin/drain", headers={"X-Admin-Token": "s3cret"}).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/api/v1/admin/resume", headers={"Authorization": "Bearer s3cret"}
+            ).status_code
+            == 200
+        )
+
+
+def test_read_endpoints_stay_unauthenticated(tmp_path: Path) -> None:
+    """The dashboard is read-mostly and sits behind a reverse proxy."""
+    client = _build_authed_client(str(tmp_path), "s3cret")
+    assert client.get("/api/v1/overview").status_code == 200
+    assert client.get("/api/v1/dependencies").status_code == 200
+
+
+def test_unconfigured_token_still_allows_admin_during_migration(tmp_path: Path) -> None:
+    """Defaults must not brick a running deployment on its next restart."""
+    client, _ = _build_client(str(tmp_path))
+    marker = tmp_path / "drain"
+    with (
+        mock.patch("orchestrator.api.DRAIN_MARKER", marker),
+        mock.patch("orchestrator.service.DRAIN_MARKER", marker),
+    ):
+        assert client.post("/api/v1/admin/drain").status_code == 200
+
+
+def test_dependencies_endpoint_reports_auth_posture(tmp_path: Path) -> None:
+    """Unauthenticated admin must be visible, never silently on."""
+    client, _ = _build_client(str(tmp_path))
+    body = client.get("/api/v1/dependencies").json()
+    assert body["admin_auth"]["enabled"] is False
+    assert body["admin_auth"]["allow_unauthenticated"] is True

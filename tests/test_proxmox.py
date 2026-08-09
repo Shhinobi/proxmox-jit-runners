@@ -209,3 +209,42 @@ async def test_destroy_stops_running_ct_and_clears_mp0_before_delete() -> None:
     delete_call = next(d for m, p, d in client.calls if m == "PUT" and p.endswith("/config"))
     assert delete_call == {"delete": "mp0"}
     assert methods_paths[-2][0] == "DELETE"
+
+
+# --- Storage status: contract verified against a real cluster ----------------
+
+
+async def test_storage_status_parses_a_real_pve_response() -> None:
+    """Locks in the shape observed on the Proxmox node (PVE 9.2.6, lvmthin).
+
+    Captured with `pvesh get /nodes/pve/storage/local-lvm/status`. The units
+    are bytes, which is what the admission guard assumes; if a future PVE
+    changes either the field names or the units, this fails loudly instead of
+    the guard silently never arming.
+    """
+    real_response = {
+        "active": 1,
+        "avail": 204585981445,
+        "content": "images,rootdir",
+        "enabled": 1,
+        "shared": 0,
+        "total": 375662837760,
+        "type": "lvmthin",
+        "used": 171076856315,
+    }
+    client = ScriptedProxmoxClient([real_response])
+
+    data = await client.storage_status()
+
+    assert data["total"] == 375662837760
+    assert data["used"] == 171076856315
+    assert data["avail"] == 204585981445
+    # ~349.9 GiB total, ~45.5% used — matches what the node reports.
+    assert round(data["total"] / 1024**3, 1) == 349.9
+    assert 0.45 < data["used"] / data["total"] < 0.46
+
+
+async def test_storage_status_targets_the_configured_storage() -> None:
+    client = ScriptedProxmoxClient([{"total": 1, "used": 0, "avail": 1}])
+    await client.storage_status()
+    assert client.calls[-1][1] == "/nodes/pve/storage/local-lvm/status"

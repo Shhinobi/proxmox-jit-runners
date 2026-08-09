@@ -62,7 +62,7 @@ def test_missing_required_label_is_rejected() -> None:
 
 def test_unknown_repository_is_rejected() -> None:
     other = payload()
-    other["repository"] = {"full_name": "OldOwner/OtherRepo"}
+    other["repository"] = {"full_name": "OldOwner/example-otherRepo"}
     decision = decide(settings(), other, "push")
     assert not decision.accepted
     assert decision.reason == "repository_not_allowed"

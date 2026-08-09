@@ -1,14 +1,23 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, cast
+import os
 
-import pytest
+# Must be set before `orchestrator.app` is imported: `create_app()` runs at
+# module import and calls `configure_telemetry()`, which builds an OTLP gRPC
+# exporter pointed at 127.0.0.1:4317. With nothing listening there, the
+# exporter's shutdown flush retries with backoff and the suite takes minutes
+# instead of seconds (measured: 15s with this set, >5min without).
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
-from orchestrator.db import Database
-from orchestrator.service import Orchestrator
-from tests.fakes import FakeBroker, FakeGitHub, FakeProxmox
-from tests.helpers import settings as make_settings
+from pathlib import Path  # noqa: E402
+from typing import Any, cast  # noqa: E402
+
+import pytest  # noqa: E402
+
+from orchestrator.db import Database  # noqa: E402
+from orchestrator.service import Orchestrator  # noqa: E402
+from tests.fakes import FakeBroker, FakeGitHub, FakeProxmox  # noqa: E402
+from tests.helpers import settings as make_settings  # noqa: E402
 
 
 @pytest.fixture
@@ -50,4 +59,6 @@ async def orchestrator(
         make_settings(), db, cast(Any, fake_github), cast(Any, fake_proxmox), cast(Any, fake_broker)
     )
     yield orch
-    await orch.stop()
+    # Short drain: the fixtures have no long-lived loops running, and a full
+    # production-length wait per test would add minutes to the suite.
+    await orch.stop(drain_seconds=0.5)

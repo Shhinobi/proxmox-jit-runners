@@ -81,12 +81,11 @@ async def test_list_jobs_omits_payload_and_parses_labels(db: Database) -> None:
     assert "payload_json" not in jobs[0]
     assert "payload" not in jobs[0]
     assert (
-        jobs[0]["github_job_url"]
-        == "https://github.com/OldOwner/example-app/actions/runs/8/job/99"
+        jobs[0]["github_job_url"] == "https://github.com/OldOwner/example-app/actions/runs/8/job/99"
     )
     filtered = await db.list_jobs(limit=10, repository="OldOwner/example-app", mode="ephemeral")
     assert len(filtered) == 1
-    empty = await db.list_jobs(limit=10, repository="OldOwner/Other")
+    empty = await db.list_jobs(limit=10, repository="OldOwner/example-other")
     assert empty == []
 
 
@@ -97,17 +96,14 @@ async def test_list_instances_includes_github_job_links(db: Database) -> None:
         "workflow_job": {"id": 77, "run_id": 12, "labels": ["self-hosted"]},
     }
     await db.enqueue_job("delivery-inst-link", payload, "ephemeral")
-    await db.create_instance(
-        5100, "10.0.0.150", "ephemeral", "running", "OldOwner/example-app", 77
-    )
+    await db.create_instance(5100, "10.0.0.150", "ephemeral", "running", "OldOwner/example-app", 77)
     await db.create_instance(5101, "10.0.0.151", "warm", "ready")
     rows = await db.list_instances()
     by_vmid = {row["vmid"]: row for row in rows}
     busy = by_vmid[5100]
     idle = by_vmid[5101]
     assert (
-        busy["github_job_url"]
-        == "https://github.com/OldOwner/example-app/actions/runs/12/job/77"
+        busy["github_job_url"] == "https://github.com/OldOwner/example-app/actions/runs/12/job/77"
     )
     assert busy["github_run_url"] == "https://github.com/OldOwner/example-app/actions/runs/12"
     assert "github_job_url" not in idle
@@ -128,9 +124,7 @@ async def test_schedule_ready_recycle_marks_pool_and_warm(db: Database) -> None:
 
 async def test_schedule_ready_recycle_refuses_busy_pool_or_warm_instances(db: Database) -> None:
     await db.create_instance(5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app")
-    await db.create_instance(
-        5001, "10.0.0.101", "warm", "provisioning", "OldOwner/example-app"
-    )
+    await db.create_instance(5001, "10.0.0.101", "warm", "provisioning", "OldOwner/example-app")
     with pytest.raises(RuntimeError):
         await db.schedule_ready_recycle()
 
@@ -138,12 +132,8 @@ async def test_schedule_ready_recycle_refuses_busy_pool_or_warm_instances(db: Da
 async def test_schedule_ready_recycle_ignores_busy_ephemeral_or_persistent(db: Database) -> None:
     """A busy job elsewhere in the fleet must not block recycling pool/warm supply."""
     await db.create_instance(5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app")
-    await db.create_instance(
-        5001, "10.0.0.101", "ephemeral", "running", "OldOwner/example-app", 9
-    )
-    await db.create_instance(
-        5002, "10.0.0.102", "persistent", "ready", "OldOwner/example-app"
-    )
+    await db.create_instance(5001, "10.0.0.101", "ephemeral", "running", "OldOwner/example-app", 9)
+    await db.create_instance(5002, "10.0.0.102", "persistent", "ready", "OldOwner/example-app")
 
     result = await db.schedule_ready_recycle()
 
@@ -291,9 +281,7 @@ async def test_last_job_activity_returns_most_recent_timestamp(db: Database) -> 
 
 async def test_list_ready_warm_only_returns_ready_rows_oldest_first(db: Database) -> None:
     await db.create_instance(5000, "10.0.0.100", "warm", "ready", "OldOwner/example-app")
-    await db.create_instance(
-        5001, "10.0.0.101", "warm", "provisioning", "OldOwner/example-app"
-    )
+    await db.create_instance(5001, "10.0.0.101", "warm", "provisioning", "OldOwner/example-app")
     await db.create_instance(5002, "10.0.0.102", "warm", "ready", "OldOwner/example-app")
     await db.create_instance(5003, "10.0.0.103", "warm", "ready", "Other/Repo")
 
