@@ -129,50 +129,30 @@ class ProxmoxClient:
                 "macfilter": 1,
             },
         )
-        # Public resolvers are configured on the CT; prevent lateral RFC1918 access.
-        rules = [
+        # Public resolvers are configured on the CT; prevent lateral RFC1918
+        # access. Anything a build legitimately needs to reach inside the
+        # network is site-specific and comes from `proxmox.egress_allow` --
+        # hardcoding addresses here made them both wrong for anyone else and
+        # impossible to correct without a code change.
+        rules: list[dict[str, Any]] = [
             {
                 "type": "out",
                 "action": "ACCEPT",
-                "dest": "10.0.1.10/32",
-                "proto": "tcp",
-                "dport": "4317",
-                "comment": "Allow OTLP gRPC to SigNoz",
-            },
-            {
-                "type": "out",
-                "action": "ACCEPT",
-                "dest": "10.0.1.10/32",
-                "proto": "tcp",
-                "dport": "4318",
-                "comment": "Allow OTLP HTTP to SigNoz",
-            },
-            {
-                "type": "out",
-                "action": "ACCEPT",
-                "dest": "10.0.1.20/32",
-                "proto": "tcp",
-                "dport": "22",
-                "comment": "Allow deploy over SSH",
-            },
+                "dest": rule.dest,
+                **({"proto": rule.proto} if rule.proto else {}),
+                **({"dport": rule.dport} if rule.dport else {}),
+                "comment": rule.comment,
+            }
+            for rule in self.config.egress_allow
+        ]
+        rules += [
             {
                 "type": "out",
                 "action": "DROP",
-                "dest": "10.0.0.0/8",
+                "dest": cidr,
                 "comment": "Deny RFC1918 lateral",
-            },
-            {
-                "type": "out",
-                "action": "DROP",
-                "dest": "172.16.0.0/12",
-                "comment": "Deny RFC1918 lateral",
-            },
-            {
-                "type": "out",
-                "action": "DROP",
-                "dest": "192.168.0.0/16",
-                "comment": "Deny RFC1918 lateral",
-            },
+            }
+            for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
         ]
         # The Proxmox firewall API prepends new rules.  Create them bottom-up so
         # the effective top-down order keeps the OTLP exceptions ahead of the

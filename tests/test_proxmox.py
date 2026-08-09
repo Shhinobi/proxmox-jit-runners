@@ -30,30 +30,6 @@ class RecordingProxmoxClient(ProxmoxClient):
         return None
 
 
-async def test_otlp_exceptions_precede_rfc1918_drops() -> None:
-    client = RecordingProxmoxClient()
-
-    await client.configure_firewall(5000)
-
-    created = [
-        data
-        for method, path, data in client.calls
-        if method == "POST" and path.endswith("/firewall/rules")
-    ]
-    # Proxmox prepends each POST. Reverse the API call sequence to model
-    # the effective order returned and evaluated by the firewall.
-    effective = list(reversed(created))
-    assert [(rule["action"], rule["dest"], rule.get("dport")) for rule in effective] == [
-        ("ACCEPT", "10.0.1.10/32", "4317"),
-        ("ACCEPT", "10.0.1.10/32", "4318"),
-        ("ACCEPT", "10.0.1.20/32", "22"),
-        ("DROP", "10.0.0.0/8", None),
-        ("DROP", "172.16.0.0/12", None),
-        ("DROP", "192.168.0.0/16", None),
-    ]
-    assert all("pos" not in rule for rule in created)
-
-
 class ScriptedProxmoxClient(ProxmoxClient):
     """Returns canned responses in call order; raises if the queue runs dry."""
 
@@ -140,8 +116,11 @@ async def test_clone_full_sequence() -> None:
     assert methods_paths[1] == ("GET", f"/nodes/pve/tasks/{quote(upid, safe='')}/status")
     assert methods_paths[2] == ("PUT", "/nodes/pve/lxc/5000/config")
     assert methods_paths[3] == ("PUT", "/nodes/pve/lxc/5000/firewall/options")
-    assert [m for m, _ in methods_paths[4:]] == ["POST"] * 6
-    assert len(client.calls) == 10
+    # Three RFC1918 denies. Any egress exceptions are configured, not
+    # hardcoded, so a default install posts only the denies.
+    assert [m for m, _ in methods_paths[4:]] == ["POST"] * 3
+    # clone + wait_task + config PUT + firewall options + 3 denies
+    assert len(client.calls) == 7
     # Clone config carries the profile sizing and job tag through.
     assert client.calls[0][2]["newid"] == 5000
     config_call = client.calls[2][2]
@@ -248,3 +227,56 @@ async def test_storage_status_targets_the_configured_storage() -> None:
     client = ScriptedProxmoxClient([{"total": 1, "used": 0, "avail": 1}])
     await client.storage_status()
     assert client.calls[-1][1] == "/nodes/pve/storage/local-lvm/status"
+
+
+# --- Runner egress firewall ---------------------------------------------------
+
+
+async def test_firewall_denies_rfc1918_by_default() -> None:
+    """With no configured exceptions a runner gets the denies and nothing else."""
+    client = ScriptedProxmoxClient([{} for _ in range(4)])
+    await client.configure_firewall(5000)
+
+    rules = [c[2] for c in client.calls if c[1].endswith("/firewall/rules")]
+    assert [r["dest"] for r in rules] == ["192.168.0.0/16", "172.16.0.0/12", "10.0.0.0/8"]
+    assert {r["action"] for r in rules} == {"DROP"}
+
+
+async def test_configured_egress_exceptions_precede_the_denies() -> None:
+    """PVE prepends rules, so exceptions must be POSTed last to end up on top.
+
+    If a deny landed above an exception the exception would never match, and
+    the failure would surface as an unrelated network problem inside a build.
+    """
+    from dataclasses import replace as dc_replace
+
+    from orchestrator.config import EgressRule
+
+    client = ScriptedProxmoxClient([{} for _ in range(6)])
+    client.config = dc_replace(
+        client.config,
+        egress_allow=(
+            EgressRule(dest="10.20.20.62/32", dport="4317", comment="OTLP gRPC"),
+            EgressRule(dest="10.20.30.65/32", dport="22", comment="deploy over SSH"),
+        ),
+    )
+
+    await client.configure_firewall(5000)
+
+    posted = [c[2] for c in client.calls if c[1].endswith("/firewall/rules")]
+    effective = list(reversed(posted))  # PVE prepends, so reverse the POST order
+    assert [r["action"] for r in effective] == ["ACCEPT", "ACCEPT", "DROP", "DROP", "DROP"]
+    assert effective[0]["dest"] == "10.20.20.62/32"
+    assert effective[0]["dport"] == "4317"
+    assert effective[1]["comment"] == "deploy over SSH"
+
+
+def test_egress_rules_require_a_destination() -> None:
+    from orchestrator.config import ConfigError, parse_egress_rules
+
+    assert parse_egress_rules(None) == ()
+    assert parse_egress_rules([{"dest": "10.0.0.5/32"}])[0].proto == "tcp"
+    with pytest.raises(ConfigError):
+        parse_egress_rules([{"dport": "22"}])
+    with pytest.raises(ConfigError):
+        parse_egress_rules("not-a-list")

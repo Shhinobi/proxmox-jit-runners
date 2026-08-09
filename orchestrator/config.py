@@ -81,6 +81,24 @@ class ProxmoxConfig:
     ip_start: int = 100
     ip_end: int = 199
     verify_tls: bool = True
+    # Outbound exceptions to the RFC1918 deny applied to every runner.
+    egress_allow: tuple[EgressRule, ...] = ()
+
+
+@dataclass(frozen=True)
+class EgressRule:
+    """One outbound exception punched through the runner firewall.
+
+    Runner containers deny lateral RFC1918 access by default. Anything a build
+    legitimately needs to reach inside the network -- a telemetry collector, a
+    deploy target -- is site-specific, so it belongs in configuration rather
+    than baked into the application.
+    """
+
+    dest: str
+    proto: str = "tcp"
+    dport: str = ""
+    comment: str = "configured egress exception"
 
 
 @dataclass(frozen=True)
@@ -322,6 +340,29 @@ def parse_capacity_config(
     if values["reconcile_budget_seconds"] < 30:
         raise ConfigError("capacity.reconcile_budget_seconds must be >= 30")
     return CapacityConfig(**values)
+
+
+def parse_egress_rules(raw: Any) -> tuple[EgressRule, ...]:
+    if not raw:
+        return ()
+    if not isinstance(raw, list):
+        raise ConfigError("proxmox.egress_allow must be a list")
+    rules: list[EgressRule] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ConfigError(f"proxmox.egress_allow[{index}] must be a mapping")
+        dest = str(item.get("dest", "")).strip()
+        if not dest:
+            raise ConfigError(f"proxmox.egress_allow[{index}].dest is required")
+        rules.append(
+            EgressRule(
+                dest=dest,
+                proto=str(item.get("proto", "tcp")),
+                dport=str(item.get("dport", "") or ""),
+                comment=str(item.get("comment", "configured egress exception")),
+            )
+        )
+    return tuple(rules)
 
 
 def parse_storage_config(raw: Any, seed: StorageConfig) -> StorageConfig:
@@ -637,6 +678,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
             ip_start=int(pve_raw.get("ip_start", 100)),
             ip_end=int(pve_raw.get("ip_end", 199)),
             verify_tls=bool(pve_raw.get("verify_tls", True)),
+            egress_allow=parse_egress_rules(pve_raw.get("egress_allow")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ConfigError(f"invalid required configuration: {exc}") from exc

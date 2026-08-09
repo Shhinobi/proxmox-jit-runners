@@ -30,6 +30,13 @@ proxmox:
   template_vmid: 9101
   storage: local-lvm
   bridge: vci
+  # Runner containers deny lateral RFC1918 access. Anything a build must
+  # legitimately reach inside your network goes here -- these addresses are
+  # site-specific, so there is no useful default.
+  # egress_allow:
+  #   - dest: 10.0.0.10/32
+  #     dport: "4317"
+  #     comment: OTLP gRPC to the collector
   gateway: 10.0.0.1
   vmid_start: 5000
   vmid_end: 5099
