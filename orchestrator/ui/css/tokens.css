@@ -1,0 +1,189 @@
+/* ============================================================================
+   LUMINOUS SLATE — design tokens for runner-orchestrator
+   ----------------------------------------------------------------------------
+   This file IS the visual identity. Every component in app.css is built only
+   from the variables declared here; no component may introduce a raw colour,
+   a raw radius, or a raw duration.
+
+   Theme model, in order of precedence:
+     :root                              -> the LIGHT palette (the base truth)
+     @media (prefers-color-scheme: dark):root:not([data-theme="light"])
+                                        -> dark, when the OS asks and the user
+                                           has not explicitly chosen light
+     :root[data-theme="dark"]           -> dark, when the user chose it
+
+   The design is dark-FIRST in intent but light-DEFINED in code, so that no
+   colour has its only definition inside a media query. A page that renders
+   before the theme script runs is still fully painted.
+   ========================================================================= */
+
+:root {
+  color-scheme: light dark;
+
+  /* --- surfaces ---------------------------------------------------------- */
+  --canvas:          #FBFCFD;   /* page ground */
+  --canvas-alt:      #F4F6F9;   /* the rail, table headers */
+  --surface:         #FFFFFF;   /* panels, cards */
+  --surface-raised:  #F4F6F9;   /* rows on hover, inputs, chips */
+  --surface-sunken:  #EEF1F5;   /* wells, code blocks, meter tracks */
+  --hairline:        #E3E8EF;   /* every border. 1px. always. */
+  --hairline-strong: #CBD3DE;   /* dividers that need to read as structure */
+
+  /* --- ink --------------------------------------------------------------- */
+  --text:            #0F1720;
+  --text-dim:        #5A6675;   /* labels, metadata, secondary copy */
+  --text-faint:      #8B98A9;   /* timestamps, units, placeholders */
+
+  /* --- signal ------------------------------------------------------------ */
+  /* Used as 1px borders, small dots, and text. NEVER as a large fill. */
+  --accent:          #0E7490;
+  --accent-ink:      #FFFFFF;   /* text on top of a solid accent */
+  --ok:              #15803D;
+  --warn:            #A16207;
+  --bad:             #BE123C;
+  --info:            #6D28D9;
+
+  /* Tinted backgrounds derived from the signal colours. Kept as their own
+     tokens rather than inline color-mix() so the mix ratio is tunable in one
+     place and identical in both themes. */
+  --ok-wash:         color-mix(in srgb, var(--ok)   8%, var(--surface));
+  --warn-wash:       color-mix(in srgb, var(--warn) 8%, var(--surface));
+  --bad-wash:        color-mix(in srgb, var(--bad)  8%, var(--surface));
+  --info-wash:       color-mix(in srgb, var(--info) 8%, var(--surface));
+  --accent-wash:     color-mix(in srgb, var(--accent) 8%, var(--surface));
+
+  /* --- type -------------------------------------------------------------- */
+  /* System stack only. No webfonts: the dashboard must render identically on
+     an air-gapped LAN, and the real UI is served under a strict no-external
+     policy. */
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "Liberation Mono", monospace;
+
+  --fs-micro:  0.6875rem;  /* 11px — eyebrow labels, uppercase */
+  --fs-small:  0.75rem;    /* 12px — table cells, metadata */
+  --fs-body:   0.8125rem;  /* 13px — default */
+  --fs-lead:   0.9375rem;  /* 15px — panel titles */
+  --fs-title:  1.125rem;   /* 18px — page titles */
+  --fs-metric: 1.5rem;     /* 24px — meter values */
+  --fs-hero:   2rem;       /* 32px — the one big number per page */
+
+  --lh-tight: 1.15;
+  --lh-body:  1.5;
+
+  --tracking-eyebrow: 0.07em;
+
+  /* --- space ------------------------------------------------------------- */
+  /* 4px base grid. Do not invent intermediate values. */
+  --s-1: 0.25rem;   /*  4 */
+  --s-2: 0.5rem;    /*  8 */
+  --s-3: 0.75rem;   /* 12 */
+  --s-4: 1rem;      /* 16 */
+  --s-5: 1.5rem;    /* 24 */
+  --s-6: 2rem;      /* 32 */
+  --s-7: 3rem;      /* 48 */
+
+  --rail-w: 232px;
+  --content-max: 1440px;
+
+  /* --- shape ------------------------------------------------------------- */
+  --r-control: 6px;
+  --r-panel:   10px;
+  --r-pill:    999px;
+
+  /* Depth comes from hairlines and surface steps, not from shadows. The two
+     shadows below exist only for genuinely floating layers (modal, popover,
+     command palette) where the eye needs a z-cue. */
+  --shadow-pop:   0 8px 24px -8px rgb(15 23 32 / 0.18),
+                  0 2px 6px -2px rgb(15 23 32 / 0.10);
+  --shadow-modal: 0 24px 64px -16px rgb(15 23 32 / 0.28),
+                  0 4px 12px -4px rgb(15 23 32 / 0.14);
+
+  /* --- motion ------------------------------------------------------------ */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --t-fast: 120ms;
+  --t-base: 160ms;
+  --t-slow: 280ms;
+
+  /* --- focus ------------------------------------------------------------- */
+  --focus-ring: 2px solid var(--accent);
+  --focus-offset: 2px;
+}
+
+/* --- DARK: OS preference, unless the user explicitly chose light ---------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --canvas:          #0D1117;
+    --canvas-alt:      #10161F;
+    --surface:         #161B22;
+    --surface-raised:  #1C222B;
+    --surface-sunken:  #0A0E14;
+    --hairline:        #1F2733;
+    --hairline-strong: #2C3644;
+
+    --text:            #E6EDF3;
+    --text-dim:        #8B98A9;
+    --text-faint:      #5A6675;
+
+    --accent:          #6EE7F9;
+    --accent-ink:      #04222B;
+    --ok:              #4ADE80;
+    --warn:            #FBBF24;
+    --bad:             #FB7185;
+    --info:            #A78BFA;
+
+    /* Dark surfaces need a slightly stronger wash to read at all. */
+    --ok-wash:     color-mix(in srgb, var(--ok)     12%, var(--surface));
+    --warn-wash:   color-mix(in srgb, var(--warn)   12%, var(--surface));
+    --bad-wash:    color-mix(in srgb, var(--bad)    12%, var(--surface));
+    --info-wash:   color-mix(in srgb, var(--info)   12%, var(--surface));
+    --accent-wash: color-mix(in srgb, var(--accent) 12%, var(--surface));
+
+    --shadow-pop:   0 8px 24px -8px rgb(0 0 0 / 0.55),
+                    0 2px 6px -2px rgb(0 0 0 / 0.40);
+    --shadow-modal: 0 24px 64px -16px rgb(0 0 0 / 0.70),
+                    0 4px 12px -4px rgb(0 0 0 / 0.50);
+  }
+}
+
+/* --- DARK: explicit user choice, wins over the OS ------------------------- */
+:root[data-theme="dark"] {
+  --canvas:          #0D1117;
+  --canvas-alt:      #10161F;
+  --surface:         #161B22;
+  --surface-raised:  #1C222B;
+  --surface-sunken:  #0A0E14;
+  --hairline:        #1F2733;
+  --hairline-strong: #2C3644;
+
+  --text:            #E6EDF3;
+  --text-dim:        #8B98A9;
+  --text-faint:      #5A6675;
+
+  --accent:          #6EE7F9;
+  --accent-ink:      #04222B;
+  --ok:              #4ADE80;
+  --warn:            #FBBF24;
+  --bad:             #FB7185;
+  --info:            #A78BFA;
+
+  --ok-wash:     color-mix(in srgb, var(--ok)     12%, var(--surface));
+  --warn-wash:   color-mix(in srgb, var(--warn)   12%, var(--surface));
+  --bad-wash:    color-mix(in srgb, var(--bad)    12%, var(--surface));
+  --info-wash:   color-mix(in srgb, var(--info)   12%, var(--surface));
+  --accent-wash: color-mix(in srgb, var(--accent) 12%, var(--surface));
+
+  --shadow-pop:   0 8px 24px -8px rgb(0 0 0 / 0.55),
+                  0 2px 6px -2px rgb(0 0 0 / 0.40);
+  --shadow-modal: 0 24px 64px -16px rgb(0 0 0 / 0.70),
+                  0 4px 12px -4px rgb(0 0 0 / 0.50);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --t-fast: 1ms;
+    --t-base: 1ms;
+    --t-slow: 1ms;
+  }
+}

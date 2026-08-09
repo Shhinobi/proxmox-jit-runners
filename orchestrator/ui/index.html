@@ -1,325 +1,1199 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Runner Orchestrator</title>
-  <link rel="stylesheet" href="/ui/styles.css" />
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runner Orchestrator</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='6' y='6' width='20' height='20' rx='4' transform='rotate(45 16 16)' fill='%236EE7F9'/></svg>">
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/app.css">
+<script>
+  /* Paint the chosen theme before first paint so there is no flash. */
+  (function () {
+    var t = localStorage.getItem("ro-theme");
+    if (t && t !== "auto") document.documentElement.setAttribute("data-theme", t);
+  })();
+</script>
 </head>
 <body>
-  <header class="top">
-    <div>
-      <h1>Runner Orchestrator</h1>
-      <p class="sub">Proxmox JIT · live dashboard</p>
-    </div>
-    <div class="header-right">
-      <div class="admin" id="admin">
-        <button type="button" id="btn-drain" class="btn warn">Drain</button>
-        <button type="button" id="btn-resume" class="btn ok">Resume</button>
-        <button type="button" id="btn-reconcile" class="btn">Reconcile</button>
-        <button type="button" id="btn-recycle-ready" class="btn warn">Recycle ready</button>
+
+<div class="app" x-data="dashboard" x-cloak
+     :class="{ 'is-reconnecting': connection === 'reconnecting' }">
+
+  <!-- ══════════════════════════════════════════════════════════════ rail ══ -->
+  <aside class="rail">
+    <a class="brand" href="#/overview" aria-label="Runner Orchestrator, overview">
+      <svg class="brand__mark" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true">
+        <rect class="glyph" x="7" y="7" width="18" height="18" rx="4"
+              transform="rotate(45 16 16)" fill="var(--accent)"/>
+        <rect x="12.5" y="12.5" width="7" height="7" rx="1.5"
+              transform="rotate(45 16 16)" fill="var(--canvas-alt)"/>
+      </svg>
+      <span class="brand__text">
+        <span class="brand__word">orchestra</span><br>
+        <span class="brand__sub">runner orchestrator</span>
+      </span>
+    </a>
+
+    <nav class="nav" aria-label="Primary">
+      <template x-for="item in [
+          {id:'overview', label:'Overview'},
+          {id:'runners',  label:'Runners'},
+          {id:'jobs',     label:'Jobs'},
+          {id:'webhooks', label:'Webhooks'}
+        ]" :key="item.id">
+        <a class="nav__item" :href="'#/' + item.id"
+           :aria-current="route === item.id ? 'page' : false">
+          <span x-text="item.label"></span>
+          <template x-if="item.id === 'runners' && failedCount">
+            <span class="nav__count is-bad num" x-text="failedCount"></span>
+          </template>
+        </a>
+      </template>
+
+      <hr style="border:none;border-top:1px solid var(--hairline);margin:var(--s-2) var(--s-3)">
+
+      <template x-for="item in [
+          {id:'capacity',     label:'Capacity'},
+          {id:'dependencies', label:'Health'},
+          {id:'drift',        label:'Drift'},
+          {id:'logs',         label:'Logs'},
+          {id:'cache',        label:'Cache'},
+          {id:'policies',     label:'Policies'}
+        ]" :key="item.id">
+        <a class="nav__item" :href="'#/' + item.id"
+           :aria-current="route === item.id ? 'page' : false">
+          <span x-text="item.label"></span>
+          <template x-if="item.id === 'drift' && driftCount">
+            <span class="nav__count num" x-text="driftCount"></span>
+          </template>
+        </a>
+      </template>
+    </nav>
+
+    <!-- Dependency state lives in the rail on purpose: the failure class that
+         caused the thin-pool exhaustion incident must be visible from every page. -->
+    <div class="rail__system">
+      <p class="eyebrow" style="padding:0 var(--s-3) var(--s-1)">Dependencies</p>
+      <div class="deps">
+        <template x-for="d in deps" :key="d.name">
+          <a class="dep" href="#/dependencies" :title="d.label + ': ' + d.detail">
+            <span class="dep__dot"
+                  :class="d.unknown ? 'is-warn' : (d.up ? 'is-up' : 'is-down')"></span>
+            <span class="dep__label" x-text="d.label"></span>
+            <span class="dep__lat" x-text="d.detail"></span>
+          </a>
+        </template>
       </div>
-      <div class="badges" id="badges"></div>
+      <div class="rail__node">
+        <span class="mono" x-text="overview.proxmox?.node ?? '—'"></span>
+        <span class="mono" x-text="overview.status ?? ''"></span>
+      </div>
     </div>
-  </header>
+  </aside>
 
-  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <!-- ══════════════════════════════════════════════════════════════ main ══ -->
+  <main class="main">
 
-  <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">
-    <div class="modal-backdrop" data-confirm-dismiss></div>
-    <div class="modal-card">
-      <div class="modal-accent" id="confirm-accent"></div>
-      <div class="modal-content">
-        <div class="modal-kicker" id="confirm-kicker">Confirm</div>
-        <h3 class="modal-title" id="confirm-title">Confirm action</h3>
-        <p class="modal-body" id="confirm-body"></p>
-        <div class="modal-actions">
-          <button type="button" class="btn ghost" id="confirm-cancel" data-confirm-dismiss>Cancel</button>
-          <button type="button" class="btn" id="confirm-ok">Confirm</button>
+    <header class="topbar">
+      <div>
+        <h1 class="topbar__title" x-text="{
+          overview:'Overview', runners:'Runners', jobs:'Jobs', webhooks:'Webhook deliveries',
+          capacity:'Capacity &amp; storage', dependencies:'Dependency health', drift:'Drift',
+          logs:'Logs', cache:'Build cache', policies:'Policies'
+        }[route] ?? 'Overview'"></h1>
+        <p class="topbar__sub">
+          <span x-text="overview.proxmox?.node ?? ''"></span>
+          <template x-if="overview.reconcile?.last_success_age_seconds != null">
+            <span>
+              · reconciled
+              <span x-text="fmt.age(overview.reconcile.last_success_age_seconds)"></span> ago
+            </span>
+          </template>
+        </p>
+      </div>
+
+      <div class="topbar__spacer"></div>
+
+      <div class="topbar__actions">
+        <button class="btn btn--ghost" @click="openPalette()">
+          <span>Search</span><span class="kbd">⌘K</span>
+        </button>
+        <button class="btn btn--ghost" @click="cycleTheme()"
+                :aria-label="'Theme: ' + theme" :title="'Theme: ' + theme">
+          <span x-text="themeGlyph" aria-hidden="true"></span>
+        </button>
+        <span class="conn" :class="{ 'is-stale': isStale }"
+              :title="staleSeconds != null ? `last update ${staleSeconds}s ago` : ''">
+          <span class="conn__dot"></span>
+          <span x-text="connection === 'live' && !isStale
+                        ? 'live'
+                        : (staleSeconds != null ? `stale ${staleSeconds}s` : connection)"></span>
+        </span>
+      </div>
+    </header>
+
+    <!-- ─────────────────────────────────────────────────────── loading ── -->
+    <template x-if="!snap">
+      <div class="page">
+        <section class="meters">
+          <template x-for="i in 6" :key="i">
+            <article class="meter">
+              <span class="skel" style="display:block;height:11px;width:60%"></span>
+              <span class="skel" style="display:block;height:24px;width:40%"></span>
+              <div class="meter__track"></div>
+              <span class="skel" style="display:block;height:12px;width:75%"></span>
+            </article>
+          </template>
+        </section>
+      </div>
+    </template>
+
+    <!-- ═════════════════════════════════════════════════════════ OVERVIEW ══ -->
+    <template x-if="snap && route === 'overview'">
+      <div class="page">
+        <section class="meters" aria-label="Key metrics">
+          <template x-for="m in meters" :key="m.label">
+            <article class="meter" :class="{ 'is-critical': m.tone === 'bad' }">
+              <p class="eyebrow" x-text="m.label"></p>
+              <p class="meter__head">
+                <span class="meter__value" x-text="m.value"></span>
+                <template x-if="m.of !== null && m.of !== undefined">
+                  <span class="meter__of" x-text="'/ ' + m.of"></span>
+                </template>
+              </p>
+              <div class="meter__track">
+                <div class="meter__fill" :class="'is-' + (m.tone || '')"
+                     :style="`width:${(m.ratio*100).toFixed(1)}%`"></div>
+                <template x-if="m.label === 'Thin pool'">
+                  <div class="meter__mark" data-label="floor"
+                       :style="`left:${(storage.floor_ratio ?? 0.8) * 100}%`"></div>
+                </template>
+              </div>
+              <p class="meter__note" x-text="m.note"></p>
+            </article>
+          </template>
+        </section>
+
+        <template x-if="alerts.length">
+          <section class="alerts" aria-label="Active alerts" aria-live="polite">
+            <template x-for="a in alerts" :key="a.code">
+              <div class="alert" :class="'is-' + a.severity">
+                <span class="alert__glyph" aria-hidden="true"
+                      x-text="a.severity === 'critical' ? '✕' : a.severity === 'warning' ? '⚠' : 'ℹ'"></span>
+                <div class="alert__body">
+                  <span class="alert__code" x-text="a.code"></span>
+                  <p class="alert__msg" x-text="a.message"></p>
+                </div>
+              </div>
+            </template>
+          </section>
+        </template>
+
+        <template x-if="!alerts.length">
+          <section class="panel">
+            <div class="empty">
+              <span class="empty__glyph" aria-hidden="true">●</span>
+              <p>No active alerts. Everything is within policy.</p>
+            </div>
+          </section>
+        </template>
+
+        <div class="grid-2">
+          <section class="panel">
+            <header class="panel__head">
+              <h2 class="panel__title"
+                  x-text="`Thin pool — ${storage.storage ?? 'storage'}`"></h2>
+              <a class="panel__meta" href="#/capacity">Details →</a>
+            </header>
+            <div class="panel__body">
+              <template x-if="gauge">
+                <div class="gauge">
+                  <p class="gauge__head">
+                    <span class="gauge__pct" x-text="fmt.pct(storage.used_ratio)"></span>
+                    <span class="gauge__bytes"
+                          x-text="`${fmt.gib(storage.used_bytes)} of ${fmt.gib(storage.total_bytes)} · ${fmt.gib(gauge.free)} free`"></span>
+                  </p>
+                  <div class="gauge__track">
+                    <div class="gauge__seg is-runners" :class="{ 'is-bad': gauge.critical }"
+                         :style="`left:0;width:${gauge.usedPct}%`"></div>
+                    <div class="gauge__floor" data-label="floor"
+                         :style="`left:${gauge.floorPct}%`"></div>
+                  </div>
+                  <p class="meter__note">
+                    Replenishment is refused above the floor, so the orchestrator stops
+                    before it can fill a pool it shares with other workloads.
+                  </p>
+                </div>
+              </template>
+              <template x-if="!gauge">
+                <div class="empty">
+                  <span class="empty__glyph" aria-hidden="true">○</span>
+                  <p>Storage reading unavailable.</p>
+                </div>
+              </template>
+            </div>
+          </section>
+
+          <section class="panel">
+            <header class="panel__head">
+              <h2 class="panel__title">Dependencies</h2>
+              <a class="panel__meta" href="#/dependencies">Details →</a>
+            </header>
+            <div class="panel__body" style="display:flex;flex-direction:column;gap:var(--s-3)">
+              <template x-for="d in deps" :key="d.name">
+                <div style="display:flex;align-items:baseline;gap:var(--s-2)">
+                  <span class="dep__dot"
+                  :class="d.unknown ? 'is-warn' : (d.up ? 'is-up' : 'is-down')"></span>
+                  <strong style="font-size:var(--fs-small)" x-text="d.label"></strong>
+                  <span class="faint mono" style="font-size:var(--fs-micro);margin-left:auto"
+                        x-text="d.detail"></span>
+                </div>
+              </template>
+              <p class="meter__note">
+                Probed independently of the reconcile loop, so a stalled pass can never
+                hide a dead dependency.
+              </p>
+            </div>
+          </section>
         </div>
-      </div>
-    </div>
-  </div>
 
-  <section class="alerts" id="alerts"></section>
-  <section class="cards" id="cards"></section>
-
-  <section class="filters panel-box">
-    <label>Repository
-      <input id="filter-repo" type="text" placeholder="owner/repo" list="repo-list" />
-      <datalist id="repo-list"></datalist>
-    </label>
-    <label>Status
-      <select id="filter-status">
-        <option value="">any</option>
-        <option>queued</option>
-        <option>provisioning</option>
-        <option>waiting_for_runner</option>
-        <option>running</option>
-        <option>completed</option>
-        <option>failed</option>
-        <option>rejected</option>
-      </select>
-    </label>
-    <label>Mode
-      <select id="filter-mode">
-        <option value="">any</option>
-        <option>ephemeral</option>
-        <option>pool</option>
-        <option>warm</option>
-        <option>persistent</option>
-      </select>
-    </label>
-    <button type="button" id="btn-apply-filters" class="btn">Apply filters</button>
-    <button type="button" id="btn-clear-filters" class="btn ghost">Clear</button>
-  </section>
-
-  <section class="panel-box chart-box">
-    <div class="chart-head">
-      <h2>Job duration (recent completed)</h2>
-      <div class="metrics-line" id="metrics-line"></div>
-    </div>
-    <canvas id="duration-chart" width="960" height="160" aria-label="Job durations chart"></canvas>
-  </section>
-
-  <nav class="tabs" role="tablist">
-    <button type="button" class="tab active" role="tab" id="tab-instances" aria-selected="true" aria-controls="panel-instances" data-tab="instances">Instances</button>
-    <button type="button" class="tab" role="tab" id="tab-jobs" aria-selected="false" aria-controls="panel-jobs" data-tab="jobs">Jobs</button>
-    <button type="button" class="tab" role="tab" id="tab-deliveries" aria-selected="false" aria-controls="panel-deliveries" data-tab="deliveries">Webhooks</button>
-    <button type="button" class="tab" role="tab" id="tab-logs" aria-selected="false" aria-controls="panel-logs" data-tab="logs">Logs</button>
-    <button type="button" class="tab" role="tab" id="tab-cache" aria-selected="false" aria-controls="panel-cache" data-tab="cache">Cache</button>
-    <button type="button" class="tab" role="tab" id="tab-policies" aria-selected="false" aria-controls="panel-policies" data-tab="policies">Policies</button>
-  </nav>
-
-  <main>
-    <section id="panel-instances" class="panel active" role="tabpanel" aria-labelledby="tab-instances">
-      <div class="table-wrap"><table id="table-instances"></table></div>
-    </section>
-    <section id="panel-jobs" class="panel" role="tabpanel" aria-labelledby="tab-jobs">
-      <div class="table-wrap"><table id="table-jobs"></table></div>
-    </section>
-    <section id="panel-deliveries" class="panel" role="tabpanel" aria-labelledby="tab-deliveries">
-      <div class="table-wrap"><table id="table-deliveries"></table></div>
-    </section>
-    <section id="panel-logs" class="panel" role="tabpanel" aria-labelledby="tab-logs">
-      <div class="logs-toolbar">
-        <label>Level
-          <select id="log-filter-level">
-            <option value="">all</option>
-            <option value="error">error</option>
-            <option value="warn">warn+</option>
-            <option value="info">info</option>
-          </select>
-        </label>
-        <label>Category
-          <select id="log-filter-category">
-            <option value="">all</option>
-            <option value="warm">warm</option>
-            <option value="job">job</option>
-            <option value="destroy">destroy</option>
-            <option value="reconcile">reconcile</option>
-            <option value="system">system</option>
-            <option value="admin">admin</option>
-          </select>
-        </label>
-        <label class="inline-check">
-          <input type="checkbox" id="log-auto-scroll" checked />
-          Follow
-        </label>
-        <button type="button" id="btn-log-clear-filters" class="btn ghost">Clear filters</button>
-        <span class="logs-meta muted" id="logs-meta"></span>
-      </div>
-      <div class="logs-wrap" id="logs-wrap">
-        <div class="logs-empty muted" id="logs-empty">Waiting for orchestrator events…</div>
-        <div id="logs-list" class="logs-list"></div>
-      </div>
-    </section>
-    <section id="panel-cache" class="panel" role="tabpanel" aria-labelledby="tab-cache">
-      <div class="policy-toolbar">
-        <button type="button" id="btn-cache-refresh" class="btn">Refresh</button>
-        <button type="button" id="btn-cache-gc" class="btn warn">GC orphans</button>
-        <span class="policy-status muted" id="cache-status" aria-live="polite"></span>
-      </div>
-      <p class="policy-hint muted" id="cache-summary">Cache inventory loads when you open this tab.</p>
-      <div class="table-wrap"><table id="table-cache"></table></div>
-      <div class="cache-rename panel-box" style="margin-top:0.75rem">
-        <h2>Rename cache (handle/repo move)</h2>
-        <div class="policy-grid">
-          <label>From
-            <input id="cache-rename-from" type="text" placeholder="OldOwner/example-app" />
-          </label>
-          <label>To
-            <input id="cache-rename-to" type="text" placeholder="acme/example-app" />
-          </label>
-        </div>
-        <div class="policy-toolbar" style="margin-top:0.55rem">
-          <button type="button" id="btn-cache-rename" class="btn ok">Rename cache</button>
-        </div>
-      </div>
-    </section>
-    <section id="panel-policies" class="panel" role="tabpanel" aria-labelledby="tab-policies" x-data x-cloak>
-      <div class="policy-toolbar">
-        <button type="button" class="btn" @click="$store.policies.addInstallation()">Add installation</button>
-        <button type="button" class="btn ok" @click="$store.policies.addRepository()">Add repository</button>
-        <button type="button" class="btn" :disabled="$store.policies.saving" :class="{ busy: $store.policies.saving }" @click="$store.policies.save()">Save policies</button>
-        <button type="button" class="btn ghost" @click="$store.policies.reset()">Reset</button>
-        <span class="policy-status muted" :class="$store.policies.statusKind" aria-live="polite" x-text="$store.policies.statusText"></span>
-      </div>
-      <p class="policy-note" x-text="$store.policies.meta.broker_note"></p>
-      <h2 class="policy-section-title">Global capacity</h2>
-      <p class="policy-hint muted">
-        <code>max_active</code> is the global ceiling of active runners (warms + jobs across
-        all repos). Must be ≥ the sum of every <code>warm_capacity</code>.
-        <code>pool_size</code> is the reserve of generic idle clones.
-      </p>
-      <div class="policy-editor">
-        <article class="policy-card capacity-card">
-          <div class="policy-card-head">
-            <strong class="mono">Cluster capacity</strong>
-            <span class="muted mono" :class="{ warn: $store.policies.warmBudgetOver }" x-text="$store.policies.warmBudgetHint"></span>
+        <section class="panel">
+          <header class="panel__head">
+            <h2 class="panel__title">Recent job timeline</h2>
+            <span class="panel__meta">queued → provisioning → running</span>
+          </header>
+          <div class="panel__body">
+            <template x-if="timelineRows(10).length">
+              <div>
+                <div class="timeline">
+                  <template x-for="row in timelineRows(10)" :key="row.job.job_id">
+                    <div class="tl-row">
+                      <span class="tl-label">
+                        <span class="mono" x-text="(row.job.repository || '').split('/')[1] || '—'"></span>
+                        <template x-if="row.job.start_source">
+                          <span class="faint" x-text="' · ' + row.job.start_source"></span>
+                        </template>
+                      </span>
+                      <div class="tl-rail" :style="`width:${row.width}%`">
+                        <template x-for="(s, i) in row.segs" :key="i">
+                          <div class="tl-seg" :class="'p-' + s.phase" :style="`width:${s.pct}%`"
+                               :title="`${s.phase}: ${s.seconds}s`"></div>
+                        </template>
+                      </div>
+                      <span class="tl-dur" x-text="row.total + 's'"></span>
+                    </div>
+                  </template>
+                </div>
+                <div class="tl-legend" style="margin-top:var(--s-4)">
+                  <template x-for="p in ['queued','provisioning','running','failed']" :key="p">
+                    <span class="gauge__key">
+                      <span class="gauge__swatch tl-seg" :class="'p-' + p"
+                            style="display:inline-block"></span>
+                      <span x-text="p"></span>
+                    </span>
+                  </template>
+                </div>
+              </div>
+            </template>
+            <template x-if="!timelineRows(10).length">
+              <div class="empty">
+                <span class="empty__glyph" aria-hidden="true">○</span>
+                <p>No completed jobs yet.</p>
+              </div>
+            </template>
           </div>
-          <div class="policy-grid">
-            <label>Max active (global)
-              <input type="number" min="1" step="1" x-model.number="$store.policies.capacity.max_active" />
-            </label>
-            <label>Pool size (global)
-              <input type="number" min="0" step="1" x-model.number="$store.policies.capacity.pool_size" />
-            </label>
+        </section>
+      </div>
+    </template>
+
+    <!-- ══════════════════════════════════════════════════════════ RUNNERS ══ -->
+    <template x-if="snap && route === 'runners'">
+      <div class="page">
+        <section class="panel">
+          <div class="table-toolbar">
+            <div class="field" style="flex:1;max-width:16rem">
+              <label class="field__label" for="f-q">Search</label>
+              <input id="f-q" class="input" type="search" placeholder="vmid, ip, runner, error…"
+                     x-model="filters.q">
+            </div>
+            <div class="field">
+              <label class="field__label" for="f-repo">Repository</label>
+              <select id="f-repo" class="select" x-model="filters.repository">
+                <option value="">any</option>
+                <template x-for="r in repoOptions" :key="r">
+                  <option :value="r" x-text="r"></option>
+                </template>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field__label" for="f-status">Status</label>
+              <select id="f-status" class="select" x-model="filters.status">
+                <option value="">any</option>
+                <template x-for="s in ['ready','running','provisioning','delete_pending','deleting','delete_failed']" :key="s">
+                  <option :value="s" x-text="s"></option>
+                </template>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field__label" for="f-mode">Mode</label>
+              <select id="f-mode" class="select" x-model="filters.mode">
+                <option value="">any</option>
+                <template x-for="s in ['warm','pool','ephemeral','persistent']" :key="s">
+                  <option :value="s" x-text="s"></option>
+                </template>
+              </select>
+            </div>
+            <div style="flex:1"></div>
+            <button class="btn" :class="{ 'is-busy': busy === 'Reconcile' }"
+                    @click="adminAction('Reconcile', '/api/v1/admin/reconcile')">Reconcile</button>
+            <button class="btn" :class="{ 'is-busy': busy === 'Recycle ready' }"
+                    @click="adminAction('Recycle ready', '/api/v1/admin/recycle-ready')">Recycle ready</button>
           </div>
-          <p class="policy-hint muted" style="margin:0">
-            <code>max_active</code> must cover sum(warm_capacity) + pool_size — raise it
-            before increasing per-repo warm capacity or the global pool.
-          </p>
-        </article>
-      </div>
 
-      <h2 class="policy-section-title">GitHub installations</h2>
-      <p class="policy-hint muted">Edit the <code>account</code> (handle/org), <code>installation_id</code>, and scope. The repository owner must match the account.</p>
-      <div class="policy-editor">
-        <template x-if="$store.policies.installations.length === 0">
-          <div class="empty">No installations yet. Click <strong>Add installation</strong>.</div>
-        </template>
-        <template x-for="(inst, index) in $store.policies.installations" :key="inst._id">
-          <article class="policy-card install-card">
-            <div class="policy-card-head">
-              <strong class="mono" x-text="`Installation #${index + 1}`"></strong>
-              <button type="button" class="btn ghost" @click="$store.policies.removeInstallation(index)">Remove</button>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>VMID</th><th>Address</th><th>Mode</th><th>Status</th>
+                  <th>Repository</th><th>Runner</th><th>Uses</th><th>Retry</th>
+                  <th>Updated</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="r in instances" :key="r.id">
+                  <tr>
+                    <td class="mono num" x-text="r.vmid"></td>
+                    <td class="mono faint" x-text="r.ip_address"></td>
+                    <td x-text="r.mode"></td>
+                    <td>
+                      <span class="status" :class="statusMeta(r.status).cls">
+                        <span class="status__glyph" aria-hidden="true"
+                              x-text="statusMeta(r.status).glyph"></span>
+                        <span x-text="statusMeta(r.status).label"></span>
+                      </span>
+                    </td>
+                    <td class="mono" x-text="r.repository ?? '—'"></td>
+                    <td class="mono faint" x-text="r.runner_name ?? '—'"></td>
+                    <td class="num" x-text="r.use_count ?? 0"></td>
+                    <td class="num faint"
+                        x-text="r.delete_attempts
+                          ? `#${r.delete_attempts}` + (r.delete_not_before
+                              ? ` in ${fmt.ageShort(r.delete_not_before - Math.floor(Date.now()/1000))}`
+                              : '')
+                          : '—'"></td>
+                    <td class="num faint" x-text="relAge(r.updated_at) + ' ago'"></td>
+                    <td>
+                      <span class="row-actions">
+                        <button class="btn btn--sm" @click="drawer = r">Inspect</button>
+                        <button class="btn btn--sm btn--danger"
+                                @click="destroyInstance(r, false)">Destroy</button>
+                      </span>
+                    </td>
+                  </tr>
+                </template>
+                <template x-if="!instances.length">
+                  <tr><td colspan="10">
+                    <div class="empty">
+                      <span class="empty__glyph" aria-hidden="true">○</span>
+                      <p>No runners match these filters.</p>
+                      <button class="btn btn--sm"
+                              @click="filters = {repository:'',status:'',mode:'',q:''}">Clear filters</button>
+                    </div>
+                  </td></tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <template x-if="overview.pending_deregistrations">
+          <section class="panel">
+            <header class="panel__head">
+              <h2 class="panel__title">Deferred GitHub deregistrations</h2>
+              <span class="panel__meta"
+                    x-text="overview.pending_deregistrations + ' queued'"></span>
+            </header>
+            <div class="panel__body">
+              <p class="meter__note">
+                These containers were destroyed locally because GitHub was unreachable.
+                Their runner registrations are queued and purge automatically once the
+                circuit closes — no container is held hostage by the outage.
+              </p>
             </div>
-            <div class="policy-grid">
-              <label>Key
-                <input x-model="inst.key" placeholder="personal-or-org" />
-              </label>
-              <label>Account (handle/org)
-                <input x-model="inst.account" placeholder="acme" />
-              </label>
-              <label>Installation ID
-                <input type="number" min="1" step="1" x-model.number="inst.installation_id" placeholder="1234567" />
-              </label>
-              <label>Scope
-                <select x-model="inst.scope">
-                  <option value="repository">repository</option>
-                  <option value="organization">organization</option>
-                </select>
-              </label>
-              <label>Runner group ID
-                <input type="number" min="1" step="1" x-model.number="inst.runner_group_id" />
-              </label>
-            </div>
-          </article>
+          </section>
         </template>
       </div>
+    </template>
 
-      <h2 class="policy-section-title">Repository policies</h2>
-      <div class="policy-editor">
-        <template x-if="$store.policies.repositories.length === 0">
-          <div class="empty">No policies yet. Click <strong>Add repository</strong>.</div>
-        </template>
-        <template x-for="(policy, index) in $store.policies.repositories" :key="policy._id">
-          <article class="policy-card repo-card">
-            <div class="policy-card-head">
-              <strong class="mono" x-text="`Policy #${index + 1}`"></strong>
-              <button type="button" class="btn ghost" @click="$store.policies.removeRepository(index)">Remove</button>
+    <!-- ═════════════════════════════════════════════════════════════ JOBS ══ -->
+    <template x-if="snap && route === 'jobs'">
+      <div class="page">
+        <section class="panel">
+          <header class="panel__head">
+            <h2 class="panel__title">Job timeline</h2>
+            <span class="panel__meta">widths are proportional to total wall time</span>
+          </header>
+          <div class="panel__body">
+            <div class="timeline">
+              <template x-for="row in timelineRows(16)" :key="row.job.job_id">
+                <div class="tl-row">
+                  <span class="tl-label"><span class="mono" x-text="row.job.repository"></span></span>
+                  <div class="tl-rail" :style="`width:${row.width}%`">
+                    <template x-for="(s, i) in row.segs" :key="i">
+                      <div class="tl-seg" :class="'p-' + s.phase" :style="`width:${s.pct}%`"
+                           :title="`${s.phase}: ${s.seconds}s`"></div>
+                    </template>
+                  </div>
+                  <span class="tl-dur" x-text="row.total + 's'"></span>
+                </div>
+              </template>
             </div>
-            <div class="policy-grid">
-              <label>Repository
-                <input x-model="policy.repository" placeholder="Owner/Name" />
-              </label>
-              <label>Installation
-                <select x-model="policy.github_installation">
-                  <template x-if="$store.policies.installationNames.length === 0">
-                    <option value="">(add an installation)</option>
-                  </template>
-                  <template x-for="name in $store.policies.installationNames" :key="name">
-                    <option :value="name" x-text="$store.policies.installationLabel(name)"></option>
-                  </template>
-                </select>
-              </label>
-              <label>Default mode
-                <select x-model="policy.default_mode">
-                  <template x-for="mode in $store.policies.meta.mode_options" :key="mode">
-                    <option :value="mode" x-text="mode"></option>
-                  </template>
-                </select>
-              </label>
-              <label>Profile
-                <select x-model="policy.profile">
-                  <template x-for="name in $store.policies.profileNames" :key="name">
-                    <option :value="name" x-text="$store.policies.profileLabel(name)"></option>
-                  </template>
-                </select>
-              </label>
-              <label>Warm capacity
-                <input type="number" min="0" step="1" x-model.number="policy.warm_capacity" />
-              </label>
-              <label>Max concurrent <span class="muted">(0 = unlimited)</span>
-                <input type="number" min="0" step="1" x-model.number="policy.max_concurrent" />
-              </label>
-              <label>Warm idle floor <span class="muted">(-1 = disabled)</span>
-                <input type="number" min="-1" :max="policy.warm_capacity" step="1" x-model.number="policy.warm_idle_capacity" />
-              </label>
-              <label>Warm idle after (minutes)
-                <input type="number" min="0" step="5" x-model.number="policy.warm_idle_after_minutes" />
-              </label>
+          </div>
+        </section>
+
+        <section class="panel">
+          <header class="panel__head"><h2 class="panel__title">Recent jobs</h2></header>
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr>
+                <th>Job</th><th>Repository</th><th>Mode</th><th>Start</th><th>Status</th>
+                <th>Runner</th><th>Attempts</th><th>Duration</th><th>Error</th><th>Created</th>
+              </tr></thead>
+              <tbody>
+                <template x-for="j in jobs" :key="j.job_id">
+                  <tr>
+                    <td>
+                      <template x-if="j.github_job_url">
+                        <a class="mono" :href="j.github_job_url" target="_blank" rel="noopener"
+                           x-text="j.job_id"></a>
+                      </template>
+                      <template x-if="!j.github_job_url">
+                        <span class="mono" x-text="j.job_id"></span>
+                      </template>
+                    </td>
+                    <td class="mono" x-text="j.repository"></td>
+                    <td x-text="j.mode ?? '—'"></td>
+                    <td>
+                      <template x-if="j.start_source">
+                        <span class="status"
+                              :class="j.start_source === 'warm' ? 's-ready'
+                                     : j.start_source === 'pool' ? 's-running' : 's-idle'">
+                          <span class="status__glyph" aria-hidden="true"
+                                x-text="j.start_source === 'cold' ? '◐' : '●'"></span>
+                          <span x-text="j.start_source"></span>
+                        </span>
+                      </template>
+                      <template x-if="!j.start_source"><span class="faint">—</span></template>
+                    </td>
+                    <td>
+                      <span class="status" :class="statusMeta(j.status).cls">
+                        <span class="status__glyph" aria-hidden="true"
+                              x-text="statusMeta(j.status).glyph"></span>
+                        <span x-text="statusMeta(j.status).label"></span>
+                      </span>
+                    </td>
+                    <td class="mono faint" x-text="j.runner_name ?? '—'"></td>
+                    <td class="num" x-text="j.attempts"></td>
+                    <td class="num" x-text="(j.duration_seconds ?? 0) + 's'"></td>
+                    <td class="faint" x-text="j.error ?? '—'"></td>
+                    <td class="num faint" x-text="relAge(j.created_at) + ' ago'"></td>
+                  </tr>
+                </template>
+                <template x-if="!jobs.length">
+                  <tr><td colspan="10">
+                    <div class="empty"><span class="empty__glyph">○</span><p>No jobs yet.</p></div>
+                  </td></tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </template>
+
+    <!-- ═════════════════════════════════════════════════════════ WEBHOOKS ══ -->
+    <template x-if="snap && route === 'webhooks'">
+      <div class="page">
+        <section class="panel">
+          <header class="panel__head">
+            <h2 class="panel__title">Webhook deliveries</h2>
+            <span class="panel__meta">POST /webhooks/github · HMAC-verified</span>
+          </header>
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr>
+                <th>Received</th><th>Event</th><th>Action</th><th>Result</th>
+                <th>Reason</th><th>Delivery</th>
+              </tr></thead>
+              <tbody>
+                <template x-for="d in (snap.deliveries ?? [])" :key="d.delivery_id">
+                  <tr>
+                    <td class="num faint" x-text="relAge(d.received_at) + ' ago'"></td>
+                    <td class="mono" x-text="d.event"></td>
+                    <td x-text="d.action ?? '—'"></td>
+                    <td>
+                      <span class="status" :class="d.accepted ? 's-ready' : 's-idle'">
+                        <span class="status__glyph" aria-hidden="true"
+                              x-text="d.accepted ? '●' : '○'"></span>
+                        <span x-text="d.accepted ? 'accepted' : 'ignored'"></span>
+                      </span>
+                    </td>
+                    <td class="mono faint" x-text="d.reason"></td>
+                    <td class="mono faint" x-text="String(d.delivery_id).slice(0, 18) + '…'"></td>
+                  </tr>
+                </template>
+                <template x-if="!(snap.deliveries ?? []).length">
+                  <tr><td colspan="6">
+                    <div class="empty"><span class="empty__glyph">○</span><p>No deliveries yet.</p></div>
+                  </td></tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </template>
+
+    <!-- ═════════════════════════════════════════════════════════ CAPACITY ══ -->
+    <template x-if="snap && route === 'capacity'">
+      <div class="page">
+        <section class="panel">
+          <header class="panel__head">
+            <h2 class="panel__title"
+                x-text="`Thin pool — ${storage.storage ?? '?'} on ${storage.node ?? '?'}`"></h2>
+            <span class="panel__meta"
+                  x-text="storage.admits === false ? 'admission BLOCKED' : 'admission open'"></span>
+          </header>
+          <div class="panel__body">
+            <template x-if="gauge">
+              <div class="gauge">
+                <p class="gauge__head">
+                  <span class="gauge__pct" x-text="fmt.pct(storage.used_ratio)"></span>
+                  <span class="gauge__bytes"
+                        x-text="`${fmt.gib(storage.used_bytes)} used of ${fmt.gib(storage.total_bytes)} · ${fmt.gib(gauge.free)} free`"></span>
+                </p>
+                <div class="gauge__track">
+                  <div class="gauge__seg is-runners" :class="{ 'is-bad': gauge.critical }"
+                       :style="`left:0;width:${gauge.usedPct}%`"></div>
+                  <div class="gauge__floor" data-label="admission floor"
+                       :style="`left:${gauge.floorPct}%`"></div>
+                </div>
+                <p class="meter__note" x-text="storage.reason"></p>
+              </div>
+            </template>
+            <template x-if="!gauge">
+              <div class="empty">
+                <span class="empty__glyph" aria-hidden="true">○</span>
+                <p>Storage reading unavailable — the guard is failing open.</p>
+              </div>
+            </template>
+          </div>
+        </section>
+
+        <div class="grid-3">
+          <section class="panel">
+            <header class="panel__head"><h2 class="panel__title">Projected demand</h2></header>
+            <div class="panel__body">
+              <p class="meter__value" x-text="fmt.gib(storage.projected_demand_bytes)"></p>
+              <p class="meter__note" style="margin-top:var(--s-2)">
+                <span class="mono" x-text="cap.max_active"></span> max_active × the
+                configured rootfs size. This is what the current configuration is allowed
+                to consume — the check that did not exist during the incident.
+              </p>
+              <template x-if="gauge">
+                <div>
+                  <div class="meter__track" style="margin-top:var(--s-3)">
+                    <div class="meter__fill"
+                         :class="gauge.projectedPct > 40 ? 'is-warn' : 'is-ok'"
+                         :style="`width:${Math.min(100, gauge.projectedPct)}%`"></div>
+                  </div>
+                  <p class="meter__note"
+                     x-text="gauge.projectedPct.toFixed(1) + '% of the pool'"></p>
+                </div>
+              </template>
             </div>
-            <p class="policy-hint muted" style="margin:0">
-              Warm idle: after this many minutes with no job request, warm supply drops
-              from <code>warm_capacity</code> to <code>warm_idle_capacity</code>, then
-              scales back up (one clone at a time) on the next request. Leave floor at
-              <code>-1</code> to keep warm_capacity fixed.
+          </section>
+
+          <section class="panel">
+            <header class="panel__head"><h2 class="panel__title">Admission</h2></header>
+            <div class="panel__body">
+              <dl class="kv">
+                <dt>Replenish</dt>
+                <dd x-text="storage.admits === false ? 'blocked' : 'allowed'"></dd>
+                <dt>New jobs</dt>
+                <dd x-text="storage.admits === false
+                            ? 'requeued as storage_exhausted' : 'allowed'"></dd>
+                <dt>Floor</dt>
+                <dd class="mono"
+                    x-text="`${fmt.pct(storage.floor_ratio, 0)} used / ${storage.min_free_gb} GiB free`"></dd>
+              </dl>
+              <p class="meter__note" style="margin-top:var(--s-3)">
+                Speculative capacity is refused hard. Real queued jobs are requeued,
+                never failed — waiting is recoverable, a burnt attempt is not.
+              </p>
+            </div>
+          </section>
+
+          <section class="panel">
+            <header class="panel__head"><h2 class="panel__title">Fleet</h2></header>
+            <div class="panel__body">
+              <dl class="kv">
+                <dt>VMID range</dt>
+                <dd class="mono" x-text="(overview.proxmox?.vmid_range ?? []).join('–')"></dd>
+                <dt>In use</dt>
+                <dd class="mono num" x-text="(snap.instances ?? []).length"></dd>
+                <dt>Template</dt>
+                <dd class="mono" x-text="overview.proxmox?.template_vmid ?? '—'"></dd>
+                <dt>Node</dt>
+                <dd class="mono" x-text="overview.proxmox?.node ?? '—'"></dd>
+              </dl>
+            </div>
+          </section>
+        </div>
+      </div>
+    </template>
+
+    <!-- ═════════════════════════════════════════════════════ DEPENDENCIES ══ -->
+    <template x-if="snap && route === 'dependencies'">
+      <div class="page">
+        <div class="grid-2">
+          <template x-for="d in deps" :key="d.name">
+            <section class="panel">
+              <header class="panel__head">
+                <span class="dep__dot"
+                  :class="d.unknown ? 'is-warn' : (d.up ? 'is-up' : 'is-down')"></span>
+                <h2 class="panel__title" x-text="d.label"></h2>
+                <span class="panel__meta mono" x-text="d.detail"></span>
+              </header>
+              <div class="panel__body">
+                <dl class="kv">
+                  <template x-if="d.failures">
+                    <dt>Consecutive failures</dt>
+                  </template>
+                  <template x-if="d.failures">
+                    <dd class="num" x-text="d.failures"></dd>
+                  </template>
+                  <template x-if="d.openFor">
+                    <dt>Circuit open for</dt>
+                  </template>
+                  <template x-if="d.openFor">
+                    <dd x-text="fmt.age(d.openFor)"></dd>
+                  </template>
+                </dl>
+                <template x-if="d.error">
+                  <p class="well" style="margin-top:var(--s-3)" x-text="d.error"></p>
+                </template>
+                <template x-if="!d.error && d.up && !d.unknown">
+                  <p class="meter__note">Healthy.</p>
+                </template>
+              </div>
+            </section>
+          </template>
+        </div>
+
+        <section class="panel">
+          <header class="panel__head">
+            <h2 class="panel__title">Admin access</h2>
+          </header>
+          <div class="panel__body">
+            <dl class="kv">
+              <dt>Token required</dt>
+              <dd x-text="overview.admin_auth?.enabled ? 'yes' : 'NO — admin routes are open'"></dd>
+              <dt>This tab</dt>
+              <dd x-text="hasToken ? 'token stored for this session' : 'no token stored'"></dd>
+            </dl>
+            <div style="margin-top:var(--s-3);display:flex;gap:var(--s-2)">
+              <button class="btn" @click="promptForToken()">Set token</button>
+              <button class="btn btn--ghost" @click="signOut()">Clear token</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </template>
+
+    <!-- ════════════════════════════════════════════════════════════ DRIFT ══ -->
+    <template x-if="snap && route === 'drift'">
+      <div class="page">
+        <section class="panel">
+          <header class="panel__head">
+            <h2 class="panel__title">Database ↔ Proxmox drift</h2>
+            <button class="btn btn--sm" style="margin-left:auto"
+                    :class="{ 'is-busy': driftLoading }" @click="loadDrift()">Scan</button>
+          </header>
+          <div class="panel__body">
+            <p class="meter__note">
+              A dry-run comparison of what the database believes against what actually
+              exists on the node. Nothing changes until you select rows and apply — and
+              apply is rejected if the set changed since this scan.
             </p>
-            <div class="policy-checks">Allowed modes
-              <div class="check-row">
-                <template x-for="mode in $store.policies.meta.mode_options" :key="mode">
-                  <label class="inline"><input type="checkbox" :value="mode" x-model="policy.allowed_modes" /> <span x-text="mode"></span></label>
-                </template>
+          </div>
+
+          <template x-if="!drift">
+            <div class="empty">
+              <span class="empty__glyph" aria-hidden="true">○</span>
+              <p>Run a scan to compare the database against the hypervisor.</p>
+            </div>
+          </template>
+
+          <template x-if="drift && !driftItems().length">
+            <div class="empty">
+              <span class="empty__glyph" aria-hidden="true">●</span>
+              <p>No drift. Every row has a container, and every managed container has a row.</p>
+            </div>
+          </template>
+
+          <template x-if="drift && driftItems().length">
+            <div>
+              <div class="table-wrap">
+                <table class="table">
+                  <thead><tr>
+                    <th></th><th>Kind</th><th>VMID</th><th>Detail</th><th>Age</th>
+                    <th>Proposed action</th>
+                  </tr></thead>
+                  <tbody>
+                    <template x-for="item in driftItems()" :key="item.kind + item.vmid">
+                      <tr>
+                        <td>
+                          <input type="checkbox" :checked="driftSelection.includes(item.vmid)"
+                                 @change="toggleDrift(item.vmid)"
+                                 :aria-label="'Select ' + item.vmid">
+                        </td>
+                        <td x-text="{row:'row without container',
+                                     container:'container without row',
+                                     stuck:'stuck in deleting'}[item.kind]"></td>
+                        <td class="mono num" x-text="item.vmid"></td>
+                        <td class="mono faint"
+                            x-text="item.runner_name ?? item.name ?? item.mode ?? '—'"></td>
+                        <td class="num faint" x-text="fmt.age(item.age_seconds)"></td>
+                        <td class="faint" x-text="{row:'delete row, queue deregistration',
+                                                   container:'destroy container on the node',
+                                                   stuck:'return to delete_pending'}[item.kind]"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+              <div class="table-toolbar"
+                   style="border-bottom:none;border-top:1px solid var(--hairline)">
+                <span class="faint"
+                      x-text="driftSelection.length + ' of ' + driftItems().length + ' selected'"></span>
+                <div style="flex:1"></div>
+                <button class="btn btn--sm" @click="driftSelection = []">Clear</button>
+                <button class="btn btn--danger" :disabled="!driftSelection.length"
+                        @click="applyDrift()">Apply repair</button>
               </div>
             </div>
-            <div class="policy-checks">Allowed events
-              <div class="check-row">
-                <template x-for="event in $store.policies.meta.event_options" :key="event">
-                  <label class="inline"><input type="checkbox" :value="event" x-model="policy.allowed_events" /> <span x-text="event"></span></label>
-                </template>
-              </div>
-            </div>
-            <div class="policy-checks">Required labels
-              <div class="check-row">
-                <template x-for="label in $store.policies.meta.label_options" :key="label">
-                  <label class="inline"><input type="checkbox" :value="label" x-model="policy.required_labels" /> <span x-text="label"></span></label>
-                </template>
-              </div>
-            </div>
-          </article>
-        </template>
+          </template>
+        </section>
       </div>
-    </section>
+    </template>
+
+    <!-- ═════════════════════════════════════════════════════════════ LOGS ══ -->
+    <template x-if="snap && route === 'logs'">
+      <div class="page">
+        <section class="panel">
+          <div class="table-toolbar">
+            <div class="field">
+              <label class="field__label" for="l-level">Level</label>
+              <select id="l-level" class="select" x-model="logFilters.level">
+                <option value="all">all</option>
+                <option value="warn">warn+</option>
+                <option value="error">error</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field__label" for="l-cat">Category</label>
+              <select id="l-cat" class="select" x-model="logFilters.category">
+                <option value="all">all</option>
+                <template x-for="c in logCategories" :key="c">
+                  <option :value="c" x-text="c"></option>
+                </template>
+              </select>
+            </div>
+            <div style="flex:1"></div>
+            <span class="faint" x-text="logs.length + ' event(s) · ring buffer'"></span>
+          </div>
+
+          <div class="logs">
+            <template x-for="l in logs" :key="l.id">
+              <div class="log"
+                   :class="{ 'l-error-row': l.level === 'error', 'has-detail': l.detail }"
+                   @click="l.detail && (openLog = openLog === l.id ? null : l.id)"
+                   :aria-expanded="l.detail ? (openLog === l.id) : undefined">
+                <span class="log__ts" x-text="fmt.time(l.ts)"></span>
+                <span class="log__lvl" :class="'l-' + l.level"
+                      x-text="String(l.level).toUpperCase()"></span>
+                <span class="log__cat" x-text="l.category"></span>
+                <span class="log__msg">
+                  <span x-text="l.message"></span>
+                  <span class="log__ctx">
+                    <template x-for="[k, v] in Object.entries(l.context ?? {})" :key="k">
+                      <span x-text="`${k}=${v}`"></span>
+                    </template>
+                  </span>
+                </span>
+                <template x-if="l.detail && openLog === l.id">
+                  <pre class="log__detail" x-text="l.detail"></pre>
+                </template>
+              </div>
+            </template>
+            <template x-if="!logs.length">
+              <div class="empty">
+                <span class="empty__glyph" aria-hidden="true">○</span>
+                <p>No events match these filters.</p>
+              </div>
+            </template>
+          </div>
+        </section>
+      </div>
+    </template>
+
+    <!-- ════════════════════════════════════════════════════════════ CACHE ══ -->
+    <template x-if="snap && route === 'cache'">
+      <div class="page">
+        <section class="panel">
+          <header class="panel__head">
+            <h2 class="panel__title">Build cache</h2>
+            <button class="btn btn--sm" style="margin-left:auto"
+                    :class="{ 'is-busy': cacheLoading }" @click="loadCache()">Refresh</button>
+          </header>
+          <template x-if="!cache">
+            <div class="empty">
+              <span class="empty__glyph" aria-hidden="true">○</span>
+              <p>Cache inventory loads from the broker on demand.</p>
+            </div>
+          </template>
+          <template x-if="cache">
+            <div class="table-wrap">
+              <table class="table">
+                <thead><tr>
+                  <th>Repository</th><th>Size</th><th>Modified</th><th>Status</th><th></th>
+                </tr></thead>
+                <tbody>
+                  <template x-for="c in (cache.repositories ?? cache.caches ?? [])"
+                            :key="c.repository">
+                    <tr>
+                      <td class="mono" x-text="c.repository"></td>
+                      <td class="num" x-text="fmt.bytes(c.size_bytes ?? c.bytes ?? 0)"></td>
+                      <td class="num faint"
+                          x-text="c.modified ? fmt.dateTime(c.modified) : '—'"></td>
+                      <td>
+                        <span class="status s-ready">
+                          <span class="status__glyph">●</span>
+                          <span x-text="c.status ?? 'present'"></span>
+                        </span>
+                      </td>
+                      <td>
+                        <span class="row-actions">
+                          <button class="btn btn--sm btn--danger"
+                                  @click="purgeCache(c.repository)">Purge</button>
+                        </span>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </section>
+      </div>
+    </template>
+
+    <!-- ═════════════════════════════════════════════════════════ POLICIES ══ -->
+    <template x-if="snap && route === 'policies'">
+      <div class="page" data-policies>
+        <section class="panel">
+          <header class="panel__head">
+            <h2 class="panel__title">Policies</h2>
+            <span class="panel__meta" :class="{ warn: $store.policies.statusKind === 'bad' }"
+                  x-text="$store.policies.statusText"></span>
+          </header>
+          <div class="table-toolbar">
+            <button class="btn" @click="$store.policies.addInstallation()">Add installation</button>
+            <button class="btn" @click="$store.policies.addRepository()">Add repository</button>
+            <div style="flex:1"></div>
+            <button class="btn btn--ghost" @click="$store.policies.reset()">Reset</button>
+            <button class="btn btn--primary" :disabled="$store.policies.saving"
+                    :class="{ 'is-busy': $store.policies.saving }"
+                    @click="$store.policies.save()">Save policies</button>
+          </div>
+          <div class="panel__body">
+            <p class="meter__note" x-text="$store.policies.meta.broker_note"></p>
+          </div>
+        </section>
+
+        <section class="panel">
+          <header class="panel__head">
+            <h2 class="panel__title">Global capacity</h2>
+            <span class="panel__meta mono" :class="{ warn: $store.policies.warmBudgetOver }"
+                  x-text="$store.policies.warmBudgetHint"></span>
+          </header>
+          <div class="panel__body">
+            <div class="grid-3">
+              <div class="field">
+                <label class="field__label" for="p-max-active">Max active (global)</label>
+                <input id="p-max-active" class="input" type="number" min="1"
+                       x-model.number="$store.policies.capacity.max_active">
+              </div>
+              <div class="field">
+                <label class="field__label" for="p-pool-size">Pool size (global)</label>
+                <input id="p-pool-size" class="input" type="number" min="0"
+                       x-model.number="$store.policies.capacity.pool_size">
+              </div>
+              <div class="field">
+                <label class="field__label">Projected disk</label>
+                <p class="meter__value" style="font-size:var(--fs-lead)"
+                   x-text="fmt.gib(storage.projected_demand_bytes)"></p>
+                <p class="meter__note">raising max_active raises this</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <header class="panel__head"><h2 class="panel__title">GitHub installations</h2></header>
+          <div class="panel__body" style="display:flex;flex-direction:column;gap:var(--s-4)">
+            <template x-for="inst in $store.policies.installations" :key="inst._id">
+              <div style="border:1px solid var(--hairline);border-radius:var(--r-control);padding:var(--s-3)">
+                <div class="grid-3">
+                  <div class="field">
+                    <label class="field__label">Key</label>
+                    <input class="input" x-model="inst.key">
+                  </div>
+                  <div class="field">
+                    <label class="field__label">Account (handle/org)</label>
+                    <input class="input" x-model="inst.account">
+                  </div>
+                  <div class="field">
+                    <label class="field__label">Installation ID</label>
+                    <input class="input" type="number" x-model.number="inst.installation_id">
+                  </div>
+                  <div class="field">
+                    <label class="field__label">Scope</label>
+                    <select class="select" x-model="inst.scope">
+                      <option value="repository">repository</option>
+                      <option value="organization">organization</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label class="field__label">Runner group ID</label>
+                    <input class="input" type="number" x-model.number="inst.runner_group_id">
+                  </div>
+                  <div class="field" style="justify-content:flex-end">
+                    <button class="btn btn--danger btn--sm"
+                            @click="$store.policies.removeInstallation(inst._id)">Remove</button>
+                  </div>
+                </div>
+              </div>
+            </template>
+            <template x-if="!$store.policies.installations.length">
+              <p class="meter__note">No installations yet. Click <strong>Add installation</strong>.</p>
+            </template>
+          </div>
+        </section>
+
+        <section class="panel">
+          <header class="panel__head"><h2 class="panel__title">Repository policies</h2></header>
+          <div class="panel__body" style="display:flex;flex-direction:column;gap:var(--s-4)">
+            <template x-for="policy in $store.policies.repositories" :key="policy._id">
+              <div style="border:1px solid var(--hairline);border-radius:var(--r-control);padding:var(--s-3)">
+                <div class="grid-3">
+                  <div class="field">
+                    <label class="field__label">Repository</label>
+                    <input class="input" x-model="policy.repository">
+                  </div>
+                  <div class="field">
+                    <label class="field__label">Installation</label>
+                    <select class="select" x-model="policy.github_installation">
+                      <template x-for="name in $store.policies.installationNames" :key="name">
+                        <option :value="name" x-text="name"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label class="field__label">Default mode</label>
+                    <select class="select" x-model="policy.default_mode">
+                      <template x-for="m in $store.policies.meta.mode_options" :key="m">
+                        <option :value="m" x-text="m"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label class="field__label">Profile</label>
+                    <select class="select" x-model="policy.profile">
+                      <template x-for="name in $store.policies.profileNames" :key="name">
+                        <option :value="name"
+                                x-text="$store.policies.profileLabel(name)"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label class="field__label">Warm capacity</label>
+                    <input class="input" type="number" min="0"
+                           x-model.number="policy.warm_capacity">
+                  </div>
+                  <div class="field">
+                    <label class="field__label">Max concurrent (0 = unlimited)</label>
+                    <input class="input" type="number" min="0"
+                           x-model.number="policy.max_concurrent">
+                  </div>
+                  <div class="field">
+                    <label class="field__label">Warm idle floor (-1 = disabled)</label>
+                    <input class="input" type="number" min="-1" :max="policy.warm_capacity"
+                           x-model.number="policy.warm_idle_capacity">
+                  </div>
+                  <div class="field">
+                    <label class="field__label">Warm idle after (minutes)</label>
+                    <input class="input" type="number" min="0"
+                           x-model.number="policy.warm_idle_after_minutes">
+                  </div>
+                  <div class="field" style="justify-content:flex-end">
+                    <button class="btn btn--danger btn--sm"
+                            @click="$store.policies.removeRepository(policy._id)">Remove</button>
+                  </div>
+                </div>
+
+                <template x-for="group in [
+                    {key:'allowed_modes',   label:'Allowed modes',   options:$store.policies.meta.mode_options},
+                    {key:'allowed_events',  label:'Allowed events',  options:$store.policies.meta.event_options},
+                    {key:'required_labels', label:'Required labels', options:$store.policies.meta.label_options}
+                  ]" :key="group.key">
+                  <div style="margin-top:var(--s-3)">
+                    <p class="eyebrow" x-text="group.label"></p>
+                    <div style="display:flex;flex-wrap:wrap;gap:var(--s-3);margin-top:var(--s-1)">
+                      <template x-for="option in group.options" :key="option">
+                        <label class="check">
+                          <input type="checkbox" :value="option" x-model="policy[group.key]">
+                          <span x-text="option"></span>
+                        </label>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </section>
+      </div>
+    </template>
+
   </main>
 
-  <footer>
-    <span id="refresh-meta">connecting…</span>
-    <span>SSE live · Authelia on public host · API <code>/api/v1/*</code></span>
-  </footer>
+  <!-- ═══════════════════════════════════════════════════════════ drawer ══ -->
+  <template x-if="drawer">
+    <div>
+      <div class="scrim" @click="drawer = null"></div>
+      <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+        <header class="drawer__head">
+          <h2 class="panel__title" id="drawer-title">
+            <span class="mono" x-text="'CT ' + drawer.vmid"></span>
+          </h2>
+          <span class="status" :class="statusMeta(drawer.status).cls">
+            <span class="status__glyph" aria-hidden="true"
+                  x-text="statusMeta(drawer.status).glyph"></span>
+            <span x-text="statusMeta(drawer.status).label"></span>
+          </span>
+          <button class="btn btn--ghost" style="margin-left:auto" @click="drawer = null"
+                  aria-label="Close">✕</button>
+        </header>
+        <div class="drawer__body">
+          <dl class="kv">
+            <dt>Address</dt><dd class="mono" x-text="drawer.ip_address"></dd>
+            <dt>Mode</dt><dd x-text="drawer.mode"></dd>
+            <dt>Repository</dt><dd class="mono" x-text="drawer.repository ?? '—'"></dd>
+            <dt>Runner name</dt><dd class="mono" x-text="drawer.runner_name ?? '—'"></dd>
+            <dt>Uses</dt><dd class="num" x-text="drawer.use_count ?? 0"></dd>
+            <dt>Created</dt><dd x-text="relAge(drawer.created_at) + ' ago'"></dd>
+            <dt>Last update</dt><dd x-text="relAge(drawer.updated_at) + ' ago'"></dd>
+            <template x-if="drawer.delete_attempts">
+              <dt>Delete attempts</dt>
+            </template>
+            <template x-if="drawer.delete_attempts">
+              <dd class="num" x-text="drawer.delete_attempts"></dd>
+            </template>
+          </dl>
+          <template x-if="drawer.error">
+            <div>
+              <p class="eyebrow" style="margin-bottom:var(--s-2)">Error</p>
+              <p class="well" x-text="drawer.error"></p>
+            </div>
+          </template>
+          <template x-if="drawer.github_job_url">
+            <p><a :href="drawer.github_job_url" target="_blank" rel="noopener">Open job on GitHub →</a></p>
+          </template>
+        </div>
+        <footer class="drawer__foot">
+          <button class="btn btn--danger" @click="destroyInstance(drawer, false)">Destroy</button>
+          <button class="btn btn--danger" @click="destroyInstance(drawer, true)">Force destroy</button>
+          <div style="flex:1"></div>
+          <button class="btn" @click="drawer = null">Close</button>
+        </footer>
+      </aside>
+    </div>
+  </template>
 
-  <script src="/ui/app.js" defer></script>
-  <script src="/ui/vendor/alpinejs-3.15.12.min.js" defer></script>
+  <!-- ═══════════════════════════════════════════════════════════ confirm ══ -->
+  <template x-if="confirmBox">
+    <div class="modal">
+      <div class="scrim" @click="resolveConfirm(false)"></div>
+      <div class="modal__card" :class="{ 'is-danger': confirmBox.kind === 'danger' }"
+           role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+        <header class="modal__head">
+          <h2 class="panel__title" id="confirm-title" x-text="confirmBox.title"></h2>
+        </header>
+        <div class="modal__body" x-text="confirmBox.body"></div>
+        <footer class="modal__foot">
+          <button class="btn" @click="resolveConfirm(false)"
+                  x-text="confirmBox.cancelLabel || 'Cancel'"></button>
+          <button class="btn"
+                  :class="confirmBox.kind === 'danger' ? 'btn--danger' : 'btn--primary'"
+                  @click="resolveConfirm(true)"
+                  x-text="confirmBox.label || confirmBox.confirmLabel || 'Confirm'"
+                  x-init="$nextTick(() => $el.focus())"></button>
+        </footer>
+      </div>
+    </div>
+  </template>
+
+  <!-- ═══════════════════════════════════════════════════════════ palette ══ -->
+  <template x-if="palette.open">
+    <div class="palette">
+      <div class="scrim" @click="palette.open = false"></div>
+      <div class="palette__card" role="dialog" aria-modal="true" aria-label="Command palette">
+        <input id="palette-input" class="palette__input" type="text"
+               placeholder="Type a command…" x-model="palette.query"
+               @input="palette.index = 0" autocomplete="off">
+        <div class="palette__list" role="listbox">
+          <template x-for="(item, i) in paletteItems" :key="item.label">
+            <button class="palette__item" role="option" :aria-selected="i === palette.index"
+                    @mouseenter="palette.index = i" @click="runPaletteItem(i)">
+              <span x-text="item.label"></span>
+              <span class="palette__hint" x-text="item.hint"></span>
+            </button>
+          </template>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- ════════════════════════════════════════════════════════════ toasts ══ -->
+  <div class="toasts" aria-live="polite">
+    <template x-for="t in toasts" :key="t.id">
+      <div class="toast" :class="t.kind ? 'is-' + t.kind : ''">
+        <div>
+          <p class="toast__title" x-text="t.title"></p>
+          <template x-if="t.body">
+            <p class="toast__body" x-text="t.body"></p>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+
+</div>
+
+<script src="js/app.js"></script>
+<script defer src="vendor/alpinejs-3.15.12.min.js"></script>
 </body>
 </html>
