@@ -14,3 +14,7 @@ venv/
 htmlcov/
 .codegraph/
 
+# Deployment-specific notes: real hostnames, addresses, vault paths.
+# This project is public; site details stay on the operator's machine.
+private/
+rework-task/

@@ -2,9 +2,18 @@
 # Usage: make <target>
 #
 # Overridable environment variables:
-#   DEPLOY_HOST   SSH host of the container (default: root@10.0.1.60)
+#   DEPLOY_HOST   SSH host of the container (required, e.g. root@10.0.0.5)
 #
-DEPLOY_HOST   ?= root@10.0.1.60
+DEPLOY_HOST   ?=
+
+# No default on purpose: this repository is public, and shipping someone
+# else's host as a default deploy target is a footgun. Set it in your
+# environment or pass it on the command line.
+define require_deploy_host
+	@test -n "$(DEPLOY_HOST)" || { \
+	  echo "\033[1;31mDEPLOY_HOST is not set\033[0m (e.g. make deploy DEPLOY_HOST=root@10.0.0.5)"; \
+	  exit 1; }
+endef
 DEPLOY_SCRIPT  = /opt/runner-orchestrator/deploy/update.sh
 REMOTE_APP     = /opt/runner-orchestrator
 SERVICE        = runner-orchestrator
@@ -24,11 +33,14 @@ build:
 	uv run ruff check orchestrator/
 	@echo "\033[1;36m==> Typecheck (mypy)...\033[0m"
 	uv run mypy orchestrator/
+	@echo "\033[1;36m==> Tests (pytest)...\033[0m"
+	uv run pytest -q
 	@echo "\033[1;32m✔  Local build done!\033[0m"
 
 ## ── build-remote ─────────────────────────────────────────────────────────────
 ## Sync dependencies on the remote host WITHOUT restarting the service.
 build-remote:
+	$(require_deploy_host)
 	@echo "\033[1;36m==> Syncing deps on $(DEPLOY_HOST)...\033[0m"
 	ssh $(DEPLOY_HOST) "cd $(REMOTE_APP) && /root/.local/bin/uv sync --no-dev"
 	@echo "\033[1;32m✔  Remote deps updated!\033[0m"
@@ -36,6 +48,7 @@ build-remote:
 ## ── deploy ────────────────────────────────────────────────────────────────────
 ## Push current branch + pull + sync deps + restart on the remote host.
 deploy:
+	$(require_deploy_host)
 	@echo "\033[1;36m==> Checking working tree...\033[0m"
 	@if ! git diff --quiet || ! git diff --cached --quiet; then \
 	  echo "\033[1;31mERROR: uncommitted changes present. Commit before deploying.\033[0m" >&2; \
@@ -50,21 +63,25 @@ deploy:
 ## ── ssh ───────────────────────────────────────────────────────────────────────
 ## Open an interactive SSH shell on the remote host.
 ssh:
+	$(require_deploy_host)
 	ssh $(DEPLOY_HOST)
 
 ## ── logs ──────────────────────────────────────────────────────────────────────
 ## Follow live logs from the service.
 logs:
+	$(require_deploy_host)
 	ssh -t $(DEPLOY_HOST) "journalctl -u $(SERVICE) -f --no-pager"
 
 ## ── status ────────────────────────────────────────────────────────────────────
 ## Show the service status on the remote host.
 status:
+	$(require_deploy_host)
 	ssh $(DEPLOY_HOST) "systemctl status $(SERVICE) --no-pager"
 
 ## ── restart ───────────────────────────────────────────────────────────────────
 ## Restart the service WITHOUT syncing deps (e.g. after editing config).
 restart:
+	$(require_deploy_host)
 	@echo "\033[1;36m==> Restarting $(SERVICE) on $(DEPLOY_HOST)...\033[0m"
 	ssh $(DEPLOY_HOST) "systemctl restart $(SERVICE)"
 	@echo "\033[1;32m✔  Service restarted.\033[0m"
@@ -72,6 +89,7 @@ restart:
 ## ── rollback ──────────────────────────────────────────────────────────────────
 ## Revert the last commit on the remote host and restart.
 rollback:
+	$(require_deploy_host)
 	@echo "\033[1;33m==> Reverting last commit on $(DEPLOY_HOST)...\033[0m"
 	ssh $(DEPLOY_HOST) "git -C $(REMOTE_APP) revert --no-edit HEAD && \
 	  bash $(DEPLOY_SCRIPT)"

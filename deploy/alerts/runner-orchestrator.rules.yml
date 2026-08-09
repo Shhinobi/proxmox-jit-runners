@@ -1,0 +1,134 @@
+# Prometheus alerting rules for runner-orchestrator.
+#
+# Written after a thin-pool exhaustion incident. The alerts that existed at
+# the time fired only on the SYMPTOM — a thin pool already ~91% full — by which
+# point containers had been leaking for days and the orchestrator itself was
+# unresponsive. Every rule below fires on a CAUSE instead, and the ordering of
+# the groups reflects how early each one would have caught that incident.
+#
+# Include from the consuming monitoring stack, e.g.:
+#   rule_files:
+#     - /etc/prometheus/rules/runner-orchestrator.rules.yml
+
+groups:
+  - name: runner-orchestrator-cause
+    rules:
+      # Would have fired ~10 minutes in. Nothing observed this at the time; the
+      # failure was only noticed several layers downstream, when a clone failed.
+      - alert: RunnerOrchestratorGitHubCircuitOpen
+        expr: runner_orchestrator_github_circuit_state == 2
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Orchestrator cannot reach api.github.com"
+          description: >-
+            The GitHub circuit has been open for 5m. Runner registration and
+            deregistration are degraded. Container teardown continues locally
+            and deregistrations are queued.
+
+      # Would have fired ~5 minutes in. A reconcile loop that cannot finish
+      # inside its own interval is the failure that took the dashboard down.
+      - alert: RunnerOrchestratorReconcileStalled
+        expr: time() - runner_orchestrator_reconcile_last_success_timestamp_seconds > 300
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "No clean reconcile pass in over 5 minutes"
+          description: >-
+            Either passes are failing or they are being truncated at their
+            budget. Check runner_orchestrator_reconcile_phase_failures_total.
+
+      - alert: RunnerOrchestratorReconcileTruncated
+        expr: rate(runner_orchestrator_reconcile_truncated_total[15m]) > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Reconcile passes are hitting their budget"
+
+  - name: runner-orchestrator-leak
+    rules:
+      # Would have fired ~30 minutes in, long before disk mattered. This is the
+      # single most valuable alert here: a teardown backlog IS a disk leak.
+      - alert: RunnerOrchestratorDeleteBacklog
+        expr: sum(runner_orchestrator_delete_backlog) > 3
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} runner containers are stuck awaiting teardown"
+
+      - alert: RunnerOrchestratorDeleteBacklogStuck
+        expr: runner_orchestrator_delete_backlog_oldest_age_seconds > 3600
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "A runner container has been undeletable for over an hour"
+          description: >-
+            Disk is leaking. Check the Runners tab, and /api/v1/drift for rows
+            whose container no longer exists.
+
+      - alert: RunnerOrchestratorCleanupFailing
+        expr: rate(runner_orchestrator_cleanup_failures_total[15m]) > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Container cleanup is failing"
+
+      - alert: RunnerOrchestratorDeregistrationBacklog
+        expr: runner_orchestrator_pending_deregistrations > 5
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "GitHub deregistrations are queued and not draining"
+          description: >-
+            Containers were destroyed locally while GitHub was unreachable.
+            Each queued entry is a runner registration GitHub still believes in.
+
+  - name: runner-orchestrator-storage
+    rules:
+      # The pre-existing hypervisor alert fired at 90%. By then lvcreate was
+      # already refusing allocations, so 80% is the actionable threshold.
+      - alert: RunnerStorageLow
+        expr: runner_orchestrator_storage_used_ratio > 0.80
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Runner storage {{ $value | humanizePercentage }} used"
+
+      - alert: RunnerStorageCritical
+        expr: runner_orchestrator_storage_used_ratio > 0.90
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Runner storage critically full"
+          description: >-
+            A thin pool at 100% suspends I/O for every volume on it, not just
+            the orchestrator's. This pool is shared with production workloads.
+
+      - alert: RunnerStorageAdmissionBlocked
+        expr: runner_orchestrator_storage_admission_blocked == 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Replenishment is blocked for lack of storage headroom"
+          description: >-
+            The orchestrator is protecting the pool. Jobs will queue rather
+            than fail, but CI capacity is reduced until space is reclaimed.
+
+  - name: runner-orchestrator-hygiene
+    rules:
+      - alert: RunnerOrchestratorDrift
+        expr: >-
+          (runner_orchestrator_drift_rows_without_container
+           + runner_orchestrator_drift_containers_without_row) > 0
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "Database and hypervisor disagree about {{ $value }} container(s)"
+          description: "Review GET /api/v1/drift; repair from the dashboard."
+
+      - alert: RunnerOrchestratorDown
+        expr: up{job="runner-orchestrator"} == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "runner-orchestrator is not being scraped"

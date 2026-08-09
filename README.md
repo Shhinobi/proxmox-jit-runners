@@ -41,10 +41,24 @@ so a crash or a flaky webhook doesn't leave things in a broken state.
 - **Per-repository policy** — required labels, which modes/events are
   allowed, a concurrency ceiling, and a resource profile (CPU/RAM/disk),
   all editable live from the dashboard — no restart needed.
-- **Self-healing reconcile loop** — the background pass described above.
+- **Self-healing reconcile loop** — the background pass described above. It
+  compares its own records against the hypervisor, not just against GitHub,
+  and each pass is bounded so one unreachable dependency can't stall it.
+- **Storage-aware** — it reads real free space on the storage it clones
+  into and refuses to pre-stage capacity below a floor, so it can't fill a
+  pool it shares with other workloads. Jobs queue rather than fail.
+- **Survives GitHub being unreachable** — containers are always torn down
+  locally; the runner deregistration is queued and settled when GitHub
+  returns. A circuit breaker stops a dead dependency from consuming the
+  reconcile budget, and a separate probe loop keeps watching it so recovery
+  is noticed even while the main loop is busy.
 - **A live dashboard** — see what's running, browse job/webhook history,
   edit policy, inspect the build cache, and trigger admin actions (drain,
-  resume, force-reconcile), all updating live over SSE.
+  resume, force-reconcile), all updating live over SSE. It also shows the
+  things an incident actually needs: storage headroom against its admission
+  floor, dependency health, the teardown backlog, a per-job timeline
+  (queued → provisioning → running), and a drift view that reconciles the
+  database against the hypervisor with a dry run before it changes anything.
 
 ## Before you start
 
@@ -94,7 +108,10 @@ implements itself:
 | Live dashboard | `/ui/` |
 | Live snapshot / SSE stream | `GET /api/v1/snapshot`, `GET /api/v1/events` |
 | Instances, jobs, webhook deliveries | `GET /api/v1/{instances,jobs,deliveries}` (filter with `?repository=&status=&mode=`) |
-| Admin actions | `POST /api/v1/admin/{drain,resume,reconcile,recycle-ready}` |
+| Admin actions | `POST /api/v1/admin/{drain,resume,reconcile,recycle-ready}` (token-protected) |
+| Drift (DB vs hypervisor) | `GET /api/v1/drift` (dry run), `POST /api/v1/admin/drift/apply` |
+| Storage headroom | `GET /api/v1/storage` |
+| Dependency health | `GET /api/v1/dependencies` |
 | Policy editing | `PUT /api/v1/admin/policies` (validates before saving, hot-reloads) |
 | Build cache | `GET /api/v1/cache`, `POST /api/v1/admin/cache/{purge,rename,gc}` |
 | Health & metrics | `GET /health/live`, `GET /health/ready`, `GET /metrics` (Prometheus) |
@@ -102,7 +119,11 @@ implements itself:
 
 The dashboard doesn't implement its own login — put it behind a reverse
 proxy or auth layer (e.g. Authelia, Tailscale) unless it's only reachable
-on a trusted network.
+on a trusted network. The **mutating** routes (`POST`/`PUT` under
+`/api/v1/admin/`) additionally take a shared token: set
+`api.admin_token_file` to a file (a systemd credential works well) and send
+it as `X-Admin-Token` or `Authorization: Bearer`. Until you do, they stay
+open and the dashboard shows a standing alert saying so.
 
 ## Development
 

@@ -89,3 +89,17 @@ testpaths = ["tests"]
 
 [tool.coverage.run]
 source = ["orchestrator"]
+branch = true
+
+[tool.coverage.report]
+# A floor at roughly today's level, not a target: it exists to catch a whole
+# module losing its tests. The gap to 100 is mostly HTTP plumbing
+# (proxmox/app/telemetry) that was thin before this work too. Raise it
+# deliberately when those get covered, never automatically.
+fail_under = 74
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

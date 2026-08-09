@@ -1,9 +1,105 @@
 # TODO / Future Work
 
-Notes from the 2026 modernization pass (uv/ruff/mypy, pytest migration,
-typed models, dashboard rewrite) — what was deliberately left out, and why,
-plus the natural next steps for continuing that work. Kept here instead of
-only in commit messages/chat history so it isn't lost.
+## Done in the resilience pass
+
+Following the thin-pool exhaustion of the incident: teardown decoupled from
+GitHub with a deferred-deregistration queue; an absolute retry deadline (the
+old backoff was resettable by any unrelated write, and never engaged at all
+when the failure came from the GitHub probe); a circuit breaker; layered HTTP
+timeouts; a runner-list cache that collapses the repeated `list_runners` calls
+a pass used to make; CT-existence reaping; pool health-checks; storage
+admission control; per-phase reconcile isolation with a pass budget; an
+independent dependency probe loop; cached readiness; graceful shutdown; warm
+creation moved off the reconcile critical path; drift detection/repair; a token
+on the mutating API; and a full dashboard rewrite.
+
+## Known, low-priority
+
+### Intermittent aiosqlite teardown warning in the test suite
+
+Roughly one run in three, some test emits
+`PytestUnhandledThreadExceptionWarning: RuntimeError: Event loop is closed`
+from an `aiosqlite` worker thread. It is a teardown artifact, not a product
+fault: a task cancelled inside a database call still completes its query on a
+worker thread, which then posts the result back with `call_soon_threadsafe`
+after pytest-asyncio has closed the loop.
+
+`Orchestrator.stop()` was reworked to drain before cancelling and to yield the
+loop afterwards, which reduced the frequency (it used to be about two runs in
+three) but cannot eliminate it: a cancel can always land mid-call, and the
+completion is posted from a thread we do not own. The production impact is nil
+— the process is exiting.
+
+If this ever needs to be zero (e.g. before adding `-W error` to CI), the real
+fix is on the data layer: a single long-lived connection, or an explicit
+`Database.close()` awaited during shutdown, rather than the connection-per-call
+model. That is the "reuse a single SQLite connection" item below.
+
+## Blocked on the operator (not code)
+
+Deployment-specific detail — real hostnames, addresses, secret-store paths —
+deliberately lives outside this repository. Operators keep their own notes;
+this section states only what has to be true, not where.
+
+### Provision an admin token, then fail closed
+
+Every `POST`/`PUT` under `/api/v1/admin/` — drain, resume, force-reconcile,
+rewrite repository policy, purge a build cache, destroy a container — accepts
+requests without any credential when `api.admin_token_file` is unset. A reverse
+proxy in front of the dashboard does not help: anything that can reach the
+service port directly bypasses it. The dashboard shows a standing
+`admin_unauthenticated` alert until a token is configured.
+
+To enable it:
+
+1. Generate a token, e.g. `openssl rand -hex 32`, and store it wherever your
+   deployment keeps secrets.
+2. Make it readable by the service as a file. With systemd, the natural fit is
+   a credential:
+
+   ```ini
+   Environment=RUNNER_ORCHESTRATOR_ADMIN_TOKEN_FILE=%d/runner_orchestrator_admin_token
+   LoadCredential=runner_orchestrator_admin_token:/path/to/admin-token
+   ```
+
+   `admin_token_file` in `config.yaml` works equally well; the environment
+   variable simply overrides it, matching how the other secrets are handled.
+3. Once the token is in place, set:
+
+   ```yaml
+   api:
+     allow_unauthenticated_admin: false
+   ```
+
+The permissive default is deliberate: configuration is loaded at import, so
+failing closed before a token exists would stop the service from starting on
+its next restart. Flip it once, after the token is provisioned.
+
+### Confirm the storage endpoint on your Proxmox version
+
+The admission guard reads `total`, `used` and `avail` (bytes) from
+`GET /nodes/{node}/storage/{storage}/status`. Verified against PVE 9.2.6 with
+an `lvmthin` storage, and pinned by
+`tests/test_proxmox.py::test_storage_status_parses_a_real_pve_response`. A
+mismatch is reported as an `error`-level `storage` event rather than silently
+failing open, but it is worth one `pvesh get` on your own version before
+trusting the floor.
+
+Note when tuning: projected demand is `max_active x rootfs_gb`, i.e. every
+container filling its whole root filesystem. Thin provisioning makes real usage
+far lower — a runner measured at roughly a quarter of its provisioned rootfs in
+practice — so `storage.total_budget_gb` is opt-in and off by default. The
+protection that acts on reality is `min_free_gb` / `max_used_percent`.
+
+### Host-level housekeeping this application cannot do
+
+- **Periodic `fstrim` for LXC guests on thin-provisioned storage.** Blocks freed
+  inside a guest are never returned to the pool without it, so "used" drifts
+  upward indefinitely regardless of what this orchestrator does. In the incident
+  that motivated this work, roughly half the exhausted space was phantom.
+- **Watch egress to the GitHub API from wherever this runs.** The orchestrator
+  now survives losing it — containers are still torn down locally and
+  deregistrations queued — but it cannot repair the network path.
 
 ## Decided against (revisit only if circumstances change)
 
@@ -58,15 +154,18 @@ touches many call sites in `service.py`; do it module by module, the same
 way `list_jobs`/`list_instances` were done, and let mypy's `disallow_untyped_defs`
 tighten alongside it (see `[tool.mypy]` in `pyproject.toml`).
 
-### Convert the remaining dashboard tabs to Alpine.js
+### ~~Convert the remaining dashboard tabs to Alpine.js~~ — done
 
-Only the Policies tab (the most complex, highest-value one) was converted
-from hand-rolled `innerHTML` rendering to Alpine.js. Instances/Jobs/
-Deliveries/Cache still use the original vanilla render functions in
-`orchestrator/ui/app.js` (`renderInstances`, `renderJobs`,
-`renderDeliveries`, `renderCacheInventory`). They coexist fine with Alpine
-today; converting them is optional cleanup, not a bug fix — do it tab by
-tab, same as Policies, each as its own reviewable change.
+Done in the UI rework. The dashboard is now `orchestrator/ui/`
+with `css/tokens.css` (the design system), `css/app.css`, and `js/app.js`
+(one Alpine component plus the ported policies store). The hand-rolled
+`innerHTML` renderers are gone, along with the manual `asset_version`
+constant — cache-busting now derives from asset mtimes.
+
+The Policies store was carried over verbatim rather than rewritten: it was
+already the most carefully validated part of the old UI. It is re-skinned
+by the new tokens and gained a live projected-disk readout beside the warm
+budget hint, so raising `max_active` shows its storage cost before saving.
 
 ### Reuse a single SQLite connection instead of one per call
 
