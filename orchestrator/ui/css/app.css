@@ -111,6 +111,9 @@ body { background: var(--canvas-sunken, var(--surface-sunken)); }
   font-size: var(--fs-micro);
   color: var(--text-faint);
   letter-spacing: 0.02em;
+  /* The name must not break mid-phrase. If this ever overflows, widen
+     --rail-w rather than dropping below the type scale. */
+  white-space: nowrap;
 }
 
 .nav { display: flex; flex-direction: column; gap: 1px; }

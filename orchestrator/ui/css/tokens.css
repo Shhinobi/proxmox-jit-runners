@@ -85,7 +85,12 @@
   --s-6: 2rem;      /* 32 */
   --s-7: 3rem;      /* 48 */
 
-  --rail-w: 232px;
+  /* Sized so `Proxmox Runner Orchestrator` sets on ONE line beside the mark.
+     At 232px it wrapped to `Proxmox Runner / Orchestrator`, breaking the name
+     mid-phrase; the alternative was a 10px subtitle, and the type scale has no
+     step there on purpose. The rail is a fixed column, so the content pane
+     simply starts 32px later. */
+  --rail-w: 264px;
   /* The whole shell is capped and centred, rail included. Capping only the
      content while the header spans the viewport leaves the header's controls
      floating a screen away from what they act on: measured on a 3440px
