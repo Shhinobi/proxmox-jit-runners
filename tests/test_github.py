@@ -15,6 +15,7 @@ from orchestrator.github import (
     GitHubUnavailable,
     _parse_retry_after,
 )
+from orchestrator.resilience import CircuitState
 
 
 class RecordingGitHubClient(GitHubClient):
@@ -446,3 +447,241 @@ async def test_truncated_list_is_never_cached() -> None:
         await client.list_runners(_installation(), "Acme/Project")
 
     assert calls > first, "a page-capped result must be re-fetched, not reused"
+
+
+# --- Dependency Probe (Rate limit & Hybrid Network/REST Probing) ------------
+
+
+async def test_network_probe_succeeds_and_returns_latency() -> None:
+    client = _plain_client()
+    mock_reader = mock.MagicMock()
+    mock_writer = mock.MagicMock()
+    mock_writer.wait_closed = mock.AsyncMock()
+
+    with mock.patch("orchestrator.github.asyncio.open_connection", return_value=(mock_reader, mock_writer)) as mock_open:
+        latency = await client.network_probe()
+
+    assert latency >= 0.0
+    mock_open.assert_called_once_with("api.github.com", 443, ssl=True)
+    mock_writer.close.assert_called_once()
+    mock_writer.wait_closed.assert_called_once()
+
+
+async def test_network_probe_raises_github_unavailable_on_os_error() -> None:
+    client = _plain_client()
+
+    with (
+        mock.patch("orchestrator.github.asyncio.open_connection", side_effect=OSError("Network unreachable")),
+        pytest.raises(GitHubUnavailable) as ctx,
+    ):
+        await client.network_probe()
+
+    assert "network probe failed: Network unreachable" in str(ctx.value)
+
+
+async def test_hybrid_probe_uses_network_probe_when_circuit_closed() -> None:
+    client = _plain_client()
+    assert client.breaker.state is CircuitState.CLOSED
+
+    with (
+        mock.patch.object(GitHubClient, "network_probe", mock.AsyncMock(return_value=0.012)) as mock_net,
+        mock.patch.object(GitHubClient, "probe_rest", mock.AsyncMock()) as mock_rest,
+    ):
+        latency = await client.probe()
+
+    assert latency == 0.012
+    mock_net.assert_called_once()
+    mock_rest.assert_not_called()
+
+
+async def test_hybrid_probe_switches_to_rest_probe_when_circuit_open() -> None:
+    client = _plain_client()
+    client.breaker._open("simulated incident")
+    assert client.breaker.state is CircuitState.OPEN
+
+    with (
+        mock.patch.object(GitHubClient, "network_probe", mock.AsyncMock()) as mock_net,
+        mock.patch.object(GitHubClient, "probe_rest", mock.AsyncMock(return_value=0.045)) as mock_rest,
+    ):
+        latency = await client.probe()
+
+    assert latency == 0.045
+    mock_net.assert_not_called()
+    mock_rest.assert_called_once()
+
+
+async def test_probe_rest_uses_installation_token_and_notes_success() -> None:
+    client = GitHubClient(
+        GitHubConfig(
+            app_id="1",
+            private_key_file="/unused",
+            webhook_secret_file="/unused",
+            installations={"Acme": GitHubInstallation("Acme", 100, "organization")},
+        )
+    )
+    passed_headers: dict[str, str] = {}
+
+    async def fake_get(_self: Any, url: str, headers: dict[str, str] | None = None, **_k: Any) -> httpx.Response:
+        nonlocal passed_headers
+        passed_headers = headers or {}
+        return httpx.Response(200, text="Design for failure.")
+
+    with (
+        mock.patch.object(GitHubClient, "_token", mock.AsyncMock(return_value="inst-tok-123")),
+        mock.patch.object(httpx.AsyncClient, "get", fake_get),
+        mock.patch.object(client.breaker, "note_probe_success") as mock_note,
+    ):
+        latency = await client.probe_rest()
+
+    assert latency >= 0.0
+    assert passed_headers.get("Authorization") == "Bearer inst-tok-123"
+    mock_note.assert_called_once()
+
+
+async def test_probe_rest_falls_back_to_app_jwt_when_no_installations() -> None:
+    client = _plain_client()
+    passed_headers: dict[str, str] = {}
+
+    async def fake_get(_self: Any, url: str, headers: dict[str, str] | None = None, **_k: Any) -> httpx.Response:
+        nonlocal passed_headers
+        passed_headers = headers or {}
+        return httpx.Response(200, text="Responsive is better than fast.")
+
+    with (
+        mock.patch.object(GitHubClient, "_app_jwt", return_value="jwt-app-abc"),
+        mock.patch.object(httpx.AsyncClient, "get", fake_get),
+    ):
+        latency = await client.probe_rest()
+
+    assert latency >= 0.0
+    assert passed_headers.get("Authorization") == "Bearer jwt-app-abc"
+
+
+async def test_probe_rest_falls_back_without_auth_when_no_installations_and_no_key() -> None:
+    client = _plain_client()
+    passed_headers: dict[str, str] = {}
+
+    async def fake_get(_self: Any, url: str, headers: dict[str, str] | None = None, **_k: Any) -> httpx.Response:
+        nonlocal passed_headers
+        passed_headers = headers or {}
+        return httpx.Response(200, text="Mind your words.")
+
+    with (
+        mock.patch.object(GitHubClient, "_app_jwt", side_effect=ValueError("no key")),
+        mock.patch.object(httpx.AsyncClient, "get", fake_get),
+    ):
+        latency = await client.probe_rest()
+
+    assert latency >= 0.0
+    assert "Authorization" not in passed_headers
+
+
+async def test_probe_rest_raises_github_unavailable_on_403_rate_limit() -> None:
+    client = _plain_client()
+
+    async def fake_get(*_a: Any, **_k: Any) -> httpx.Response:
+        return httpx.Response(
+            403,
+            headers={"retry-after": "60", "x-ratelimit-remaining": "0"},
+            json={"message": "rate limit exceeded"},
+        )
+
+    with (
+        mock.patch.object(GitHubClient, "_app_jwt", return_value="jwt"),
+        mock.patch.object(httpx.AsyncClient, "get", fake_get),
+        mock.patch.object(client.breaker, "note_probe_success") as mock_note,
+        pytest.raises(GitHubUnavailable) as ctx,
+    ):
+        await client.probe_rest()
+
+    assert ctx.value.status_code == 403
+    assert ctx.value.retry_after == 60.0
+    mock_note.assert_not_called()
+
+
+async def test_probe_rest_raises_github_unavailable_on_5xx() -> None:
+    client = _plain_client()
+
+    async def fake_get(*_a: Any, **_k: Any) -> httpx.Response:
+        return httpx.Response(503, json={"message": "service unavailable"})
+
+    with (
+        mock.patch.object(GitHubClient, "_app_jwt", return_value="jwt"),
+        mock.patch.object(httpx.AsyncClient, "get", fake_get),
+        pytest.raises(GitHubUnavailable) as ctx,
+    ):
+        await client.probe_rest()
+
+    assert ctx.value.status_code == 503
+
+
+async def test_probe_rest_raises_github_unavailable_on_transport_error() -> None:
+    client = _plain_client()
+
+    async def fake_get(*_a: Any, **_k: Any) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    with (
+        mock.patch.object(GitHubClient, "_app_jwt", return_value="jwt"),
+        mock.patch.object(httpx.AsyncClient, "get", fake_get),
+        pytest.raises(GitHubUnavailable) as ctx,
+    ):
+        await client.probe_rest()
+
+    assert "connection refused" in str(ctx.value)
+
+
+async def test_probe_rest_retries_once_on_401_with_fresh_token() -> None:
+    client = GitHubClient(
+        GitHubConfig(
+            app_id="1",
+            private_key_file="/unused",
+            webhook_secret_file="/unused",
+            installations={"Acme": GitHubInstallation("Acme", 100, "organization")},
+        )
+    )
+    tokens = ["stale-tok", "fresh-tok"]
+    responses = [
+        httpx.Response(401, json={"message": "bad credentials"}),
+        httpx.Response(200, text="Practicality beats purity."),
+    ]
+    seen_tokens: list[str] = []
+
+    async def fake_token(_self: Any, _inst: Any) -> str:
+        return tokens.pop(0)
+
+    async def fake_get(_self: Any, url: str, headers: dict[str, str] | None = None, **_k: Any) -> httpx.Response:
+        if headers and "Authorization" in headers:
+            seen_tokens.append(headers["Authorization"].removeprefix("Bearer "))
+        return responses.pop(0)
+
+    with (
+        mock.patch.object(GitHubClient, "_token", fake_token),
+        mock.patch.object(httpx.AsyncClient, "get", fake_get),
+    ):
+        latency = await client.probe_rest()
+
+    assert latency >= 0.0
+    assert seen_tokens == ["stale-tok", "fresh-tok"]
+
+
+async def test_probe_rest_raises_github_unavailable_when_token_acquisition_fails() -> None:
+    client = GitHubClient(
+        GitHubConfig(
+            app_id="1",
+            private_key_file="/unused",
+            webhook_secret_file="/unused",
+            installations={"Acme": GitHubInstallation("Acme", 100, "organization")},
+        )
+    )
+
+    with (
+        mock.patch.object(
+            GitHubClient, "_token", mock.AsyncMock(side_effect=GitHubError("auth failed", status_code=401))
+        ),
+        pytest.raises(GitHubUnavailable) as ctx,
+    ):
+        await client.probe_rest()
+
+    assert "probe token request failed" in str(ctx.value)
+

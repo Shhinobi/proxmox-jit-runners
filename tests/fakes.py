@@ -257,6 +257,10 @@ class FakeGitHub(FakeClientBase):
         await self.delete_runner(*_args, **_kwargs)
         return True
 
+    async def probe(self) -> float:
+        await self._gate("probe")
+        return 0.005
+
     @staticmethod
     def runner_url(*_: Any) -> str:
         return "https://github.com/OldOwner/example-app"

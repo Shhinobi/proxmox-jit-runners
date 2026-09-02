@@ -8,12 +8,13 @@ import time
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import jwt
 
 from .config import GitHubConfig, GitHubInstallation
-from .resilience import CircuitBreaker, CircuitOpen
+from .resilience import CircuitBreaker, CircuitOpen, CircuitState
 from .security import CachedSecret
 
 LOGGER = logging.getLogger("runner_orchestrator")
@@ -464,28 +465,101 @@ class GitHubClient:
                 return False
             raise
 
-    async def probe(self, *, timeout: float = 5.0) -> float:
-        """Cheap liveness check against GitHub, returning latency in seconds.
+    def _probe_target(self) -> tuple[str, int, bool]:
+        parsed = urlsplit(self.config.api_url)
+        host = parsed.hostname or "api.github.com"
+        is_ssl = parsed.scheme != "http"
+        port = parsed.port or (443 if is_ssl else 80)
+        return host, port, is_ssl
 
-        Uses the unauthenticated `/zen` endpoint on purpose: it costs nothing
-        against the installation's 5000/h budget, so the probe can run often
-        enough to notice recovery without competing with real work.
+    async def network_probe(self, *, timeout: float = 3.0) -> float:
+        """Transport-level connectivity and TLS handshake check.
+
+        Verifies DNS resolution, TCP routing, and TLS handshake to the GitHub API host
+        without issuing any HTTP REST request or consuming any rate limit quota.
+        """
+        host, port, is_ssl = self._probe_target()
+        started = time.monotonic()
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port, ssl=is_ssl),
+                timeout=timeout,
+            )
+        except (OSError, TimeoutError) as exc:
+            raise GitHubUnavailable(f"network probe failed: {exc}") from exc
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except OSError:
+            pass
+        return time.monotonic() - started
+
+    async def probe_rest(self, *, timeout: float = 5.0) -> float:
+        """Authenticated HTTP REST liveness check against GitHub.
+
+        Authenticated with an installation token (or App JWT) so the probe
+        draws from the 5000/h installation budget instead of exhausting the
+        60/h unauthenticated IP rate limit.
 
         Deliberately NOT gated by the breaker — this is the out-of-band signal
         that tells the breaker the dependency came back.
         """
         started = time.monotonic()
+        installation = next(iter(self.config.installations.values()), None)
         try:
-            response = await self._client.get(f"{self.config.api_url}/zen", timeout=timeout)
+            if installation is not None:
+                token = await self._token(installation)
+                headers = self._headers(token)
+            else:
+                try:
+                    headers = self._headers(self._app_jwt())
+                except Exception:  # noqa: BLE001 — fallback to basic headers when App key is unavailable
+                    headers = {
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": self.config.api_version,
+                        "User-Agent": "proxmox-jit-runner-orchestrator/0.1",
+                    }
+            response = await self._client.get(
+                f"{self.config.api_url}/zen", headers=headers, timeout=timeout
+            )
+            if response.status_code == 401 and installation is not None:
+                self.invalidate_token(installation)
+                token = await self._token(installation)
+                response = await self._client.get(
+                    f"{self.config.api_url}/zen", headers=self._headers(token), timeout=timeout
+                )
         except httpx.TransportError as exc:
             raise GitHubUnavailable(f"probe failed: {exc}") from exc
-        if response.is_error and response.status_code >= 500:
-            raise GitHubUnavailable(f"probe got HTTP {response.status_code}")
+        except GitHubError as exc:
+            raise GitHubUnavailable(
+                f"probe token request failed: {exc}",
+                status_code=exc.status_code,
+                retry_after=exc.retry_after,
+            ) from exc
+
+        if response.is_error:
+            raise GitHubUnavailable(
+                f"probe got HTTP {response.status_code}",
+                status_code=response.status_code,
+                retry_after=_parse_retry_after(response.headers),
+            )
         latency = time.monotonic() - started
         # Shortens the open window; never forces the circuit closed, because
         # only a real call proves the API usable for what we need it for.
         self.breaker.note_probe_success()
         return latency
+
+    async def probe(self, *, timeout: float = 5.0, force_rest: bool = False) -> float:
+        """Hybrid connectivity probe.
+
+        - In normal (CLOSED / HALF_OPEN) state: verifies reachability via
+          `network_probe()` without issuing HTTP requests or consuming API quota.
+        - In degraded (OPEN) state: issues an authenticated REST probe via `probe_rest()`
+          to detect API recovery and shorten the circuit breaker's open window.
+        """
+        if force_rest or self.breaker.state is CircuitState.OPEN:
+            return await self.probe_rest(timeout=timeout)
+        return await self.network_probe(timeout=min(timeout, 3.0))
 
     @staticmethod
     def runner_url(installation: GitHubInstallation, repository: str) -> str:
