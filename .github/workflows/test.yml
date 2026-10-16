@@ -6,7 +6,7 @@ on:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: arc-k3s-light
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
@@ -18,7 +18,7 @@ jobs:
       - run: uv run mypy orchestrator
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: arc-k3s-medium
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
