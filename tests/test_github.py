@@ -458,7 +458,9 @@ async def test_network_probe_succeeds_and_returns_latency() -> None:
     mock_writer = mock.MagicMock()
     mock_writer.wait_closed = mock.AsyncMock()
 
-    with mock.patch("orchestrator.github.asyncio.open_connection", return_value=(mock_reader, mock_writer)) as mock_open:
+    with mock.patch(
+        "orchestrator.github.asyncio.open_connection", return_value=(mock_reader, mock_writer)
+    ) as mock_open:
         latency = await client.network_probe()
 
     assert latency >= 0.0
@@ -471,7 +473,10 @@ async def test_network_probe_raises_github_unavailable_on_os_error() -> None:
     client = _plain_client()
 
     with (
-        mock.patch("orchestrator.github.asyncio.open_connection", side_effect=OSError("Network unreachable")),
+        mock.patch(
+            "orchestrator.github.asyncio.open_connection",
+            side_effect=OSError("Network unreachable"),
+        ),
         pytest.raises(GitHubUnavailable) as ctx,
     ):
         await client.network_probe()
@@ -484,7 +489,9 @@ async def test_hybrid_probe_uses_network_probe_when_circuit_closed() -> None:
     assert client.breaker.state is CircuitState.CLOSED
 
     with (
-        mock.patch.object(GitHubClient, "network_probe", mock.AsyncMock(return_value=0.012)) as mock_net,
+        mock.patch.object(
+            GitHubClient, "network_probe", mock.AsyncMock(return_value=0.012)
+        ) as mock_net,
         mock.patch.object(GitHubClient, "probe_rest", mock.AsyncMock()) as mock_rest,
     ):
         latency = await client.probe()
@@ -501,7 +508,9 @@ async def test_hybrid_probe_switches_to_rest_probe_when_circuit_open() -> None:
 
     with (
         mock.patch.object(GitHubClient, "network_probe", mock.AsyncMock()) as mock_net,
-        mock.patch.object(GitHubClient, "probe_rest", mock.AsyncMock(return_value=0.045)) as mock_rest,
+        mock.patch.object(
+            GitHubClient, "probe_rest", mock.AsyncMock(return_value=0.045)
+        ) as mock_rest,
     ):
         latency = await client.probe()
 
@@ -521,7 +530,9 @@ async def test_probe_rest_uses_installation_token_and_notes_success() -> None:
     )
     passed_headers: dict[str, str] = {}
 
-    async def fake_get(_self: Any, url: str, headers: dict[str, str] | None = None, **_k: Any) -> httpx.Response:
+    async def fake_get(
+        _self: Any, url: str, headers: dict[str, str] | None = None, **_k: Any
+    ) -> httpx.Response:
         nonlocal passed_headers
         passed_headers = headers or {}
         return httpx.Response(200, text="Design for failure.")
@@ -542,7 +553,9 @@ async def test_probe_rest_falls_back_to_app_jwt_when_no_installations() -> None:
     client = _plain_client()
     passed_headers: dict[str, str] = {}
 
-    async def fake_get(_self: Any, url: str, headers: dict[str, str] | None = None, **_k: Any) -> httpx.Response:
+    async def fake_get(
+        _self: Any, url: str, headers: dict[str, str] | None = None, **_k: Any
+    ) -> httpx.Response:
         nonlocal passed_headers
         passed_headers = headers or {}
         return httpx.Response(200, text="Responsive is better than fast.")
@@ -561,7 +574,9 @@ async def test_probe_rest_falls_back_without_auth_when_no_installations_and_no_k
     client = _plain_client()
     passed_headers: dict[str, str] = {}
 
-    async def fake_get(_self: Any, url: str, headers: dict[str, str] | None = None, **_k: Any) -> httpx.Response:
+    async def fake_get(
+        _self: Any, url: str, headers: dict[str, str] | None = None, **_k: Any
+    ) -> httpx.Response:
         nonlocal passed_headers
         passed_headers = headers or {}
         return httpx.Response(200, text="Mind your words.")
@@ -650,7 +665,9 @@ async def test_probe_rest_retries_once_on_401_with_fresh_token() -> None:
     async def fake_token(_self: Any, _inst: Any) -> str:
         return tokens.pop(0)
 
-    async def fake_get(_self: Any, url: str, headers: dict[str, str] | None = None, **_k: Any) -> httpx.Response:
+    async def fake_get(
+        _self: Any, url: str, headers: dict[str, str] | None = None, **_k: Any
+    ) -> httpx.Response:
         if headers and "Authorization" in headers:
             seen_tokens.append(headers["Authorization"].removeprefix("Bearer "))
         return responses.pop(0)
@@ -677,11 +694,12 @@ async def test_probe_rest_raises_github_unavailable_when_token_acquisition_fails
 
     with (
         mock.patch.object(
-            GitHubClient, "_token", mock.AsyncMock(side_effect=GitHubError("auth failed", status_code=401))
+            GitHubClient,
+            "_token",
+            mock.AsyncMock(side_effect=GitHubError("auth failed", status_code=401)),
         ),
         pytest.raises(GitHubUnavailable) as ctx,
     ):
         await client.probe_rest()
 
     assert "probe token request failed" in str(ctx.value)
-
